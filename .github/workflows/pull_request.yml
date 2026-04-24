@@ -323,49 +323,49 @@ jobs:
           pr_number.txt
           head_sha.txt
 
- artifacts:
-  name: Build and upload jxl_cli binaries
-  runs-on: ubuntu-latest
-  strategy:
-    matrix:
-      target:
-        - x86_64-unknown-linux-gnu
-        - x86_64-pc-windows-msvc
-
-  steps:
-    - name: Checkout
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      with:
-        submodules: recursive
-        persist-credentials: false
-
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-
-    - name: Add target
-      run: rustup target add ${{ matrix.target }}
-
-    # Required for MSVC cross-compilation
-    - name: Install LLVM (for lld-link)
-      if: matrix.target == 'x86_64-pc-windows-msvc'
-      run: sudo apt-get update && sudo apt-get install -y lld clang
-
-    - name: Build jxl_cli (size optimized)
-      run: |
-        RUSTFLAGS="-C strip=symbols -C link-arg=-s" \
-        cargo build --release --bin jxl_cli --target ${{ matrix.target }}
-
-    - name: Prepare artifact
-      run: |
-        mkdir -p dist
-        if [[ "${{ matrix.target }}" == *windows* ]]; then
-          cp target/${{ matrix.target }}/release/jxl_cli.exe dist/
-        else
-          cp target/${{ matrix.target }}/release/jxl_cli dist/
-        fi
-
-    - name: Upload artifact
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: jxl_cli-${{ matrix.target }}
-        path: dist/*
+  artifacts:
+    name: Build and upload jxl_cli binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+  
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          submodules: recursive
+          persist-credentials: false
+  
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+  
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+  
+      # Required for MSVC cross-compilation
+      - name: Install LLVM (for lld-link)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: sudo apt-get update && sudo apt-get install -y lld clang
+  
+      - name: Build jxl_cli (size optimized)
+        run: |
+          RUSTFLAGS="-C strip=symbols -C link-arg=-s" \
+          cargo build --release --bin jxl_cli --target ${{ matrix.target }}
+  
+      - name: Prepare artifact
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp target/${{ matrix.target }}/release/jxl_cli.exe dist/
+          else
+            cp target/${{ matrix.target }}/release/jxl_cli dist/
+          fi
+  
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: jxl_cli-${{ matrix.target }}
+          path: dist/*
