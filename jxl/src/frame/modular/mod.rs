@@ -453,10 +453,10 @@ impl FullModularImage {
 
         // Disallow progressive rendering with multi-channel palette transforms
         // or delta-palette.
-        let has_problematic_palette_transform = header.transforms.iter().any(|x| {
-            x.id == TransformId::Palette
-                && (x.num_channels > 1 || x.predictor_id != Predictor::Zero as u32)
-        });
+        //let has_problematic_palette_transform = header.transforms.iter().any(|x| {
+        //    x.id == TransformId::Palette
+        //        && (x.num_channels > 1 || x.predictor_id != Predictor::Zero as u32)
+        //});
 
         let has_squeeze_transform = header
             .transforms
@@ -604,9 +604,8 @@ impl FullModularImage {
             transform_steps,
             section_buffer_indices,
             modular_color_channels,
-            can_do_partial_render: !has_problematic_palette_transform,
-            can_do_early_partial_render: !has_problematic_palette_transform
-                && has_squeeze_transform,
+            can_do_partial_render: true,
+            can_do_early_partial_render: has_squeeze_transform,
             decoded_section0_channels: 0,
             needed_section0_channels_for_early_render: buffers_for_channels.len()
                 + num_meta_channels,
