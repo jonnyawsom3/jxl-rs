@@ -19,6 +19,7 @@ use crate::{
         frame_header::FrameHeader, toc::IncrementalTocReader,
     },
     icc::IncrementalIccReader,
+    util::NewWithCapacity,
 };
 
 use super::{CodestreamParser, SectionBuffer};
@@ -50,13 +51,13 @@ impl CodestreamParser {
             let xsize = file_header.size.xsize() as usize;
             let ysize = file_header.size.ysize() as usize;
             check_size_limit(
-                decode_options.pixel_limit,
+                decode_options.sample_limit,
                 (xsize, ysize),
                 file_header.image_metadata.extra_channel_info.len(),
             )?;
             if let Some(preview) = &file_header.image_metadata.preview {
                 check_size_limit(
-                    decode_options.pixel_limit,
+                    decode_options.sample_limit,
                     (preview.xsize() as usize, preview.ysize() as usize),
                     file_header.image_metadata.extra_channel_info.len(),
                 )?;
@@ -175,18 +176,7 @@ impl CodestreamParser {
                 });
             }
 
-            if let Some(user_profile) = &self.output_color_profile {
-                // Validate user's output color profile choice (libjxl compatibility)
-                // For non-XYB without CMS: only same encoding as embedded is allowed
-                if !xyb_encoded
-                    && decode_options.cms.is_none()
-                    && *user_profile != embedded_color_profile
-                {
-                    return Err(Error::NonXybOutputNoCMS);
-                }
-            } else {
-                self.update_default_output_color_profile();
-            }
+            self.update_default_output_color_profile();
 
             let mut br = BitReader::new(&self.non_section_buf);
             br.skip_bits(self.non_section_bit_offset as usize)?;
@@ -227,7 +217,7 @@ impl CodestreamParser {
             let mut frame_header = FrameHeader::read_unconditional(&(), &mut br, &nonserialized)?;
             frame_header.postprocess(&nonserialized);
             check_size_limit(
-                decode_options.pixel_limit,
+                decode_options.sample_limit,
                 frame_header.size(),
                 frame_header.num_extra_channels as usize,
             )?;
@@ -236,9 +226,21 @@ impl CodestreamParser {
             self.lf_global_section = None;
             self.lf_sections.clear();
             self.hf_global_section = None;
-            self.hf_sections = (0..frame_header.num_groups())
-                .map(|_| (0..frame_header.passes.num_passes).map(|_| None).collect())
-                .collect();
+            // Use fallible allocation: `num_groups()` is derived from the
+            // (untrusted) frame header dimensions and can be astronomically
+            // large for malformed/fuzz inputs. Avoid aborting the process on
+            // OOM and return a recoverable error instead.
+            let num_groups = frame_header.num_groups();
+            let num_passes = frame_header.passes.num_passes as usize;
+            let mut hf_sections = Vec::new_with_capacity(num_groups)?;
+            for _ in 0..num_groups {
+                let mut row = Vec::new_with_capacity(num_passes)?;
+                for _ in 0..num_passes {
+                    row.push(None);
+                }
+                hf_sections.push(row);
+            }
+            self.hf_sections = hf_sections;
             self.candidate_hf_sections.clear();
 
             self.frame_header = Some(frame_header);
@@ -343,10 +345,6 @@ impl CodestreamParser {
 
         frame.prepare_render_pipeline(
             self.pixel_format.as_ref().unwrap(),
-            decode_options.cms.as_deref(),
-            self.embedded_color_profile
-                .as_ref()
-                .expect("embedded_color_profile should be set before pipeline preparation"),
             self.output_color_profile
                 .as_ref()
                 .expect("output_color_profile should be set before pipeline preparation"),

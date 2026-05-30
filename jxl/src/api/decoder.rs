@@ -62,7 +62,7 @@ pub struct VisibleFrameInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisibleFrameSeekTarget {
     /// File byte offset to start feeding input from.
-    pub decode_start_file_offset: usize,
+    pub decode_start_file_offset: u64,
     /// Remaining codestream bytes in the current container box at the seek
     /// point. Pass this to [`JxlDecoder::start_new_frame`].
     pub remaining_in_box: u64,
@@ -164,12 +164,6 @@ impl JxlDecoder<WithImageInfo> {
         self.inner.output_color_profile().unwrap()
     }
 
-    /// Specifies the preferred color profile to be used for outputting data.
-    /// Same semantics as JxlDecoderSetOutputColorProfile.
-    pub fn set_output_color_profile(&mut self, profile: JxlColorProfile) -> Result<()> {
-        self.inner.set_output_color_profile(profile)
-    }
-
     /// Retrieves the current pixel format for output buffers.
     pub fn current_pixel_format(&self) -> &JxlPixelFormat {
         self.inner.current_pixel_format().unwrap()
@@ -193,8 +187,11 @@ impl JxlDecoder<WithImageInfo> {
 
     /// Draws all the pixels we have data for. This is useful for i.e. previewing LF frames.
     ///
+    /// Returns `true` if any new pixels were written to `buffers` since the
+    /// previous call to `flush_pixels`; `false` if nothing new was rendered.
+    ///
     /// Note: see `process` for alignment requirements for the buffer data.
-    pub fn flush_pixels(&mut self, buffers: &mut [JxlOutputBuffer<'_>]) -> Result<()> {
+    pub fn flush_pixels(&mut self, buffers: &mut [JxlOutputBuffer<'_>]) -> Result<bool> {
         self.inner.flush_pixels(buffers)
     }
 
@@ -276,8 +273,11 @@ impl JxlDecoder<WithFrameInfo> {
 
     /// Draws all the pixels we have data for.
     ///
+    /// Returns `true` if any new pixels were written to `buffers` since the
+    /// previous call to `flush_pixels`; `false` if nothing new was rendered.
+    ///
     /// Note: see `process` for alignment requirements for the buffer data.
-    pub fn flush_pixels(&mut self, buffers: &mut [JxlOutputBuffer<'_>]) -> Result<()> {
+    pub fn flush_pixels(&mut self, buffers: &mut [JxlOutputBuffer<'_>]) -> Result<bool> {
         self.inner.flush_pixels(buffers)
     }
 
@@ -320,6 +320,56 @@ pub(crate) mod tests {
             .unwrap();
             Ok(())
         });
+    }
+
+    /// `ftyp` minor version 1 with `jxlp` boxes in physical order 0, 2, 1, 3 (streaming OOO).
+    #[test]
+    fn decode_ooo_jxlp_animated_container() {
+        let data = std::fs::read("resources/test/animated_ooo_jxlp.jxl").unwrap();
+        let (_decoded_count, frames) = decode(&data, usize::MAX, false, false, None).unwrap();
+        assert!(
+            frames.len() >= 4,
+            "expected at least 4 decoded frames (animation + possible blending frames)"
+        );
+
+        let color0 = &frames[0][0];
+        let (cw, ch) = color0.size();
+        assert_eq!(
+            (cw, ch),
+            (500 * 3, 160),
+            "RGB interleaved buffer is 500×3 by 160"
+        );
+
+        // Golden RGB8 values for the **last** decoded frame at selected (x, y), taken from
+        // libjxl `djxl` (APNG last frame) on `animated_ooo_jxlp.jxl`. Wrong `jxlp` assembly
+        // typically still decodes but shifts bitstream alignment so these pixels no longer match.
+        let last_color = &frames.last().expect("at least one frame")[0];
+        assert_eq!(last_color.size(), (500 * 3, 160));
+
+        let rgb_at = |img: &Image<f32>, x: usize, y: usize| -> (f32, f32, f32) {
+            let row = img.row(y);
+            let b = x * 3;
+            (row[b], row[b + 1], row[b + 2])
+        };
+
+        // Decoder `f32` buffer is display-referred sRGB in 0..1 (channel value ≈ sRGB8/255).
+        // Expected triples match libjxl `djxl` APNG last frame at the same coordinates.
+        let s = |c: u8| c as f32 / 255.0;
+        let checks = [
+            ((21, 27), (s(15), s(15), s(15))),
+            ((22, 27), (s(15), s(15), s(15))),
+            ((43, 27), (s(156), s(156), s(156))),
+            ((57, 27), (s(26), s(26), s(26))),
+            ((250, 80), (s(245), s(245), s(245))),
+        ];
+        for &((x, y), (er, eg, eb)) in &checks {
+            let (r, g, b) = rgb_at(last_color, x, y);
+            let close = |a: f32, e: f32| (a - e).abs() < 1e-5;
+            assert!(
+                close(r, er) && close(g, eg) && close(b, eb),
+                "last-frame RGB mismatch at ({x}, {y}): got ({r:.7}, {g:.7}, {b:.7}) expected ({er:.7}, {eg:.7}, {eb:.7})"
+            );
+        }
     }
 
     #[allow(clippy::type_complexity)]
@@ -673,34 +723,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_set_output_color_profile() {
-        use crate::api::JxlColorProfile;
-
-        let file = std::fs::read("resources/test/basic.jxl").unwrap();
-        let options = JxlDecoderOptions::default();
-        let mut decoder = JxlDecoder::<states::Initialized>::new(options);
-        let mut input = file.as_slice();
-        let mut decoder = loop {
-            match decoder.process(&mut input).unwrap() {
-                ProcessingResult::Complete { result } => break result,
-                ProcessingResult::NeedsMoreInput { fallback, .. } => decoder = fallback,
-            }
-        };
-
-        // Get the embedded profile and set it as output (should work)
-        let embedded = decoder.embedded_color_profile().clone();
-        let result = decoder.set_output_color_profile(embedded);
-        assert!(result.is_ok());
-
-        // Setting an ICC profile without CMS should fail
-        let icc_profile = JxlColorProfile::Icc(vec![0u8; 100]);
-        let result = decoder.set_output_color_profile(icc_profile);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_default_output_tf_by_pixel_format() {
-        use crate::api::{JxlColorEncoding, JxlTransferFunction};
+        use crate::api::JxlTransferFunction;
 
         // Using test image with ICC profile to trigger default transfer function path
         let file = std::fs::read("resources/test/lossy_with_icc.jxl").unwrap();
@@ -738,13 +762,6 @@ pub(crate) mod tests {
             *decoder.output_color_profile().transfer_function().unwrap(),
             JxlTransferFunction::SRGB,
         );
-
-        // Once output color profile is set by user, it will remain as is regardless of what pixel
-        // format is set
-        let profile = JxlColorProfile::Simple(JxlColorEncoding::srgb(false));
-        decoder.set_output_color_profile(profile.clone()).unwrap();
-        decoder.set_pixel_format(JxlPixelFormat::rgba_f16(0));
-        assert!(decoder.output_color_profile() == &profile);
     }
 
     #[test]
@@ -1706,7 +1723,7 @@ pub(crate) mod tests {
 
                 // 4. Seek to decode-start.
                 decoder.start_new_frame(seek_target);
-                let mut input = &data[seek_target.decode_start_file_offset..];
+                let mut input = &data[seek_target.decode_start_file_offset as usize..];
 
                 // Advance to Frame Header
                 assert!(matches!(
@@ -1873,7 +1890,7 @@ pub(crate) mod tests {
         assert!(frames[0].is_keyframe);
         assert_eq!(
             frames[0].seek_target.decode_start_file_offset,
-            frames[0].file_offset
+            frames[0].file_offset as u64
         );
     }
 
@@ -1913,7 +1930,7 @@ pub(crate) mod tests {
         assert_eq!(frames.len(), 1);
         let f = &frames[0];
         assert!(f.is_keyframe);
-        assert_eq!(f.seek_target.decode_start_file_offset, f.file_offset);
+        assert_eq!(f.seek_target.decode_start_file_offset, f.file_offset as u64);
         assert_eq!(f.seek_target.visible_frames_to_skip, 0);
     }
 
@@ -1926,7 +1943,7 @@ pub(crate) mod tests {
 
         for frame in &frames {
             assert!(
-                frame.seek_target.decode_start_file_offset <= frame.file_offset,
+                frame.seek_target.decode_start_file_offset <= frame.file_offset as u64,
                 "frame {}: decode_start_file_offset {} > file_offset {}",
                 frame.index,
                 frame.seek_target.decode_start_file_offset,
@@ -1977,7 +1994,7 @@ pub(crate) mod tests {
         ];
 
         let opts = JxlDecoderOptions {
-            pixel_limit: Some(1024 * 1024 * 1024),
+            sample_limit: Some(1024 * 1024 * 1024),
             ..Default::default()
         };
         let mut decoder = JxlDecoderInner::new(opts);
@@ -2006,7 +2023,7 @@ pub(crate) mod tests {
 
         let opts = JxlDecoderOptions {
             scan_frames_only: true,
-            pixel_limit: Some(1024 * 1024 * 1024),
+            sample_limit: Some(1024 * 1024 * 1024),
             ..Default::default()
         };
         let mut decoder = JxlDecoderInner::new(opts);

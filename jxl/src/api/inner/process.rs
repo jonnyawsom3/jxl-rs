@@ -82,6 +82,22 @@ impl SmallBuffer {
         amount
     }
 
+    /// Prepend bytes so they are returned next by [`Self::take`] (and appear first in [`Deref`]).
+    pub(super) fn inject_bytes_front(&mut self, data: Vec<u8>) {
+        if data.is_empty() {
+            return;
+        }
+        if self.range.is_empty() {
+            self.buf = data;
+            self.range = 0..self.buf.len();
+            return;
+        }
+        let mut combined = data;
+        combined.extend_from_slice(&self.buf[self.range.clone()]);
+        self.buf = combined;
+        self.range = 0..self.buf.len();
+    }
+
     pub(super) fn new(initial_size: usize) -> Self {
         Self {
             buf: vec![0; initial_size],
@@ -131,8 +147,11 @@ impl JxlDecoderInner {
         ))
     }
 
-    /// Draws all the pixels we have data for.
-    pub fn flush_pixels(&mut self, buffers: &mut [JxlOutputBuffer]) -> Result<()> {
+    /// Draws all the pixels we have data for. Returns `true` if any new pixels
+    /// were written to `buffers` since the previous call to `flush_pixels`;
+    /// returns `false` if no new rendering has happened, in which case the
+    /// contents of `buffers` are unchanged from the caller's perspective.
+    pub fn flush_pixels(&mut self, buffers: &mut [JxlOutputBuffer]) -> Result<bool> {
         let mut input: &[u8] = &[];
         match self.codestream_parser.process(
             &mut self.box_parser,
@@ -141,8 +160,11 @@ impl JxlDecoderInner {
             Some(buffers),
             true,
         ) {
-            Ok(()) => Ok(()),
-            Err(crate::error::Error::OutOfBounds(_)) => Ok(()),
+            Ok(()) | Err(crate::error::Error::OutOfBounds(_)) => {
+                let updated = self.codestream_parser.pixels_dirty;
+                self.codestream_parser.pixels_dirty = false;
+                Ok(updated)
+            }
             Err(e) => Err(e),
         }
     }

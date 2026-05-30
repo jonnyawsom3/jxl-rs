@@ -179,8 +179,9 @@ impl ModularChannel {
 }
 
 const BUFFER_STATUS_NOT_RENDERED: usize = 0;
-const BUFFER_STATUS_PARTIAL_RENDER: usize = 1;
-const BUFFER_STATUS_FINAL_RENDER: usize = 2;
+const BUFFER_STATUS_ZERO_FILLED: usize = 1;
+const BUFFER_STATUS_PARTIAL_RENDER: usize = 2;
+const BUFFER_STATUS_FINAL_RENDER: usize = 3;
 
 // Note: this type uses interior mutability to get mutable references to multiple buffers at once.
 // In principle, this is not needed, but the overhead should be minimal so using `unsafe` here is
@@ -358,8 +359,8 @@ pub struct FullModularImage {
     modular_color_channels: usize,
     can_do_partial_render: bool,
     can_do_early_partial_render: bool,
-    decoded_section0_channels: usize,
     needed_section0_channels_for_early_render: usize,
+    has_decoded_data: bool,
     global_header: Option<GroupHeader>,
     buffers_for_channels: Vec<usize>,
     // Buffers to _start rendering from_ on the next call to process_output.
@@ -369,6 +370,8 @@ pub struct FullModularImage {
     ready_buffers: BTreeSet<(usize, usize)>,
     // Whether each channel is used or not by the render pipeline.
     pipeline_used_channels: Vec<bool>,
+    log_group_dim: usize,
+    num_groups: (usize, usize),
 }
 
 impl FullModularImage {
@@ -378,8 +381,6 @@ impl FullModularImage {
 
     pub fn can_do_early_partial_render(&self) -> bool {
         self.can_do_early_partial_render
-            // Avoid green martians
-            && self.decoded_section0_channels >= self.needed_section0_channels_for_early_render
     }
 
     pub fn set_pipeline_used_channels(&mut self, used: &[bool]) {
@@ -438,13 +439,15 @@ impl FullModularImage {
                 modular_color_channels,
                 can_do_partial_render: true,
                 can_do_early_partial_render: false,
-                decoded_section0_channels: 0,
                 needed_section0_channels_for_early_render: 0,
+                has_decoded_data: false,
                 global_header: None,
                 buffers_for_channels: vec![],
                 ready_buffers_dry_run: BTreeSet::new(),
                 ready_buffers: BTreeSet::new(),
                 pipeline_used_channels: vec![],
+                log_group_dim: frame_header.log_group_dim(),
+                num_groups: frame_header.size_groups(),
             });
         }
 
@@ -607,14 +610,16 @@ impl FullModularImage {
             can_do_partial_render: !has_problematic_palette_transform,
             can_do_early_partial_render: !has_problematic_palette_transform
                 && has_squeeze_transform,
-            decoded_section0_channels: 0,
             needed_section0_channels_for_early_render: buffers_for_channels.len()
                 + num_meta_channels,
+            has_decoded_data: false,
             global_header: Some(header),
             buffers_for_channels,
             ready_buffers_dry_run: BTreeSet::new(),
             ready_buffers: BTreeSet::new(),
             pipeline_used_channels: vec![],
+            log_group_dim: frame_header.log_group_dim(),
+            num_groups: frame_header.size_groups(),
         })
     }
 
@@ -625,6 +630,7 @@ impl FullModularImage {
         br: &mut BitReader,
         allow_partial: bool,
     ) -> Result<()> {
+        let allow_partial = allow_partial && self.can_do_early_partial_render;
         let mut decoded_if_partial = 0;
         let ret = with_buffers(
             &self.buffer_info,
@@ -642,23 +648,20 @@ impl FullModularImage {
             },
         );
 
-        match (ret, allow_partial) {
-            (Ok(_), _) => {
-                // Decoded section completely.
-                self.decoded_section0_channels = self.section_buffer_indices[0].len();
-            }
-            (Err(_), true) => {
-                self.decoded_section0_channels = decoded_if_partial;
-            }
+        let num_decoded = match (ret, allow_partial) {
+            // Decoded section completely.
+            (Ok(_), _) => self.section_buffer_indices[0].len(),
+            (Err(_), true) => decoded_if_partial,
             (Err(e), false) => {
                 return Err(e);
             }
-        }
+        };
 
-        for b in self.section_buffer_indices[0]
-            .iter()
-            .take(self.decoded_section0_channels)
-        {
+        // Avoid green martians
+        self.has_decoded_data |=
+            num_decoded >= self.needed_section0_channels_for_early_render && num_decoded > 0;
+
+        for b in self.section_buffer_indices[0].iter().take(num_decoded) {
             if self.buffer_info[*b].buffer_grid[0].get_status() == BUFFER_STATUS_FINAL_RENDER {
                 continue;
             }
@@ -722,6 +725,8 @@ impl FullModularImage {
             },
         )?;
 
+        self.has_decoded_data |= !self.section_buffer_indices[section_id].is_empty();
+
         Ok(())
     }
 
@@ -733,11 +738,15 @@ impl FullModularImage {
         pass_to_pipeline: &mut dyn FnMut(usize, usize, bool, Option<Image<i32>>) -> Result<()>,
     ) -> Result<()> {
         if let Some(chan) = self.buffer_info[buf].info.output_channel_idx {
-            let is_final =
-                self.buffer_info[buf].buffer_grid[grid].get_status() == BUFFER_STATUS_FINAL_RENDER;
+            let grid_is_none = self.buffer_info[buf].grid_kind == ModularGridKind::None;
+            let grid_idx = if grid_is_none { 0 } else { grid };
+            let is_final = self.buffer_info[buf].buffer_grid[grid_idx].get_status()
+                == BUFFER_STATUS_FINAL_RENDER;
             let all_final = self.buffers_for_channels.iter().all(|x| {
-                self.buffer_info[*x].buffer_grid[grid].get_status() == BUFFER_STATUS_FINAL_RENDER
+                self.buffer_info[*x].buffer_grid[grid_idx].get_status()
+                    == BUFFER_STATUS_FINAL_RENDER
             });
+
             let channels: SmallVec<usize, 3> = if chan == 0 && self.modular_color_channels == 1 {
                 (0..3).filter(|x| self.pipeline_used_channels[*x]).collect()
             } else {
@@ -755,11 +764,39 @@ impl FullModularImage {
                 }
             } else {
                 debug!("Rendering channel {chan:?}, grid position {grid}");
-                let buf = self.buffer_info[buf].buffer_grid[grid].get_buffer(all_final)?;
-                for c in channels[1..].iter() {
-                    pass_to_pipeline(*c, grid, is_final, Some(buf.data.try_clone()?))?;
+
+                let modular_buf = self.buffer_info[buf].buffer_grid[grid_idx]
+                    .get_buffer(all_final && !grid_is_none)?;
+                let mut image = modular_buf.data;
+
+                if grid_is_none {
+                    let (shift_x, shift_y) = self.buffer_info[buf].info.shift.unwrap_or((0, 0));
+                    let log_group_dim = self.log_group_dim;
+                    let gx = grid % self.num_groups.0;
+                    let gy = grid / self.num_groups.0;
+
+                    let rect = Rect {
+                        origin: (gx << log_group_dim, gy << log_group_dim),
+                        size: (1 << log_group_dim, 1 << log_group_dim),
+                    };
+                    let rect = rect.downsample((shift_x as u8, shift_y as u8));
+                    let full_size = self.buffer_info[buf].buffer_grid[grid_idx].size;
+                    let rect = rect.clip(full_size);
+
+                    if rect.origin != (0, 0) || rect.size != full_size {
+                        let mut cropped = Image::new(rect.size)?;
+                        let src_view = image.get_rect(rect);
+                        for y in 0..rect.size.1 {
+                            cropped.row_mut(y).copy_from_slice(src_view.row(y));
+                        }
+                        image = cropped;
+                    }
                 }
-                pass_to_pipeline(channels[0], grid, is_final, Some(buf.data))?;
+
+                for c in channels[1..].iter() {
+                    pass_to_pipeline(*c, grid, is_final, Some(image.try_clone()?))?;
+                }
+                pass_to_pipeline(channels[0], grid, is_final, Some(image))?;
             }
         }
         Ok(())
@@ -885,7 +922,13 @@ impl FullModularImage {
 
         // Pass all the output buffers to the render pipeline.
         for (buf, grid) in buffers_to_output {
-            self.maybe_output(buf, grid, dry_run, pass_to_pipeline)?;
+            if self.buffer_info[buf].grid_kind == ModularGridKind::None {
+                for g in 0..self.num_groups.0 * self.num_groups.1 {
+                    self.maybe_output(buf, g, dry_run, pass_to_pipeline)?;
+                }
+            } else {
+                self.maybe_output(buf, grid, dry_run, pass_to_pipeline)?;
+            }
         }
 
         Ok(())
@@ -906,7 +949,7 @@ impl FullModularImage {
         chan: usize,
         pass_to_pipeline: &mut dyn FnMut(usize, usize, bool, Image<i32>) -> Result<()>,
     ) -> Result<()> {
-        if !self.can_do_partial_render() {
+        if !self.can_do_partial_render() || !self.has_decoded_data {
             return Ok(());
         }
         let buf_idx = self.buffers_for_channels[chan];
@@ -944,7 +987,7 @@ impl FullModularImage {
             for b in self.section_buffer_indices[section].iter() {
                 if self.buffer_info[*b].buffer_grid[grid].get_status() == BUFFER_STATUS_NOT_RENDERED
                 {
-                    self.buffer_info[*b].buffer_grid[grid].set_status(BUFFER_STATUS_PARTIAL_RENDER);
+                    self.buffer_info[*b].buffer_grid[grid].set_status(BUFFER_STATUS_ZERO_FILLED);
                     self.ready_buffers.insert((*b, grid));
                 }
             }
@@ -961,6 +1004,10 @@ impl FullModularImage {
         }
 
         Ok(())
+    }
+
+    pub fn has_decoded_data(&self) -> bool {
+        self.has_decoded_data
     }
 }
 

@@ -675,3 +675,499 @@ pub fn do_vsqueeze_step(
 
     vsqueeze(in_avg, in_res, in_next_avg, out_prev, out);
 }
+
+const WEIGHTS_2D: [[[i32; 5]; 5]; 4] = [
+    // py=0, px=0
+    [
+        [0, 7, 93, 0, 0],
+        [7, 6175, 12905, 1188, 0],
+        [93, 12905, 25198, 2842, 0],
+        [0, 1188, 2842, 93, 0],
+        [0, 0, 0, 0, 0],
+    ],
+    // py=0, px=1
+    [
+        [0, 0, 93, 7, 0],
+        [0, 1188, 12905, 6175, 7],
+        [0, 2842, 25198, 12905, 93],
+        [0, 93, 2842, 1188, 0],
+        [0, 0, 0, 0, 0],
+    ],
+    // py=1, px=0
+    [
+        [0, 0, 0, 0, 0],
+        [0, 1188, 2842, 93, 0],
+        [93, 12905, 25198, 2842, 0],
+        [7, 6175, 12905, 1188, 0],
+        [0, 7, 93, 0, 0],
+    ],
+    // py=1, px=1
+    [
+        [0, 0, 0, 0, 0],
+        [0, 93, 2842, 1188, 0],
+        [0, 2842, 25198, 12905, 93],
+        [0, 1188, 12905, 6175, 7],
+        [0, 0, 93, 7, 0],
+    ],
+];
+
+const WEIGHTS_H: [[[i32; 5]; 3]; 2] = [
+    // px=0
+    [
+        [0, 3145, 6787, 474, 0],
+        [116, 14093, 27370, 3145, 0],
+        [0, 3145, 6787, 474, 0],
+    ],
+    // px=1
+    [
+        [0, 474, 6787, 3145, 0],
+        [0, 3145, 27370, 14093, 116],
+        [0, 474, 6787, 3145, 0],
+    ],
+];
+
+const WEIGHTS_V: [[[i32; 3]; 5]; 2] = [
+    // py=0
+    [
+        [0, 116, 0],
+        [3145, 14093, 3145],
+        [6787, 27370, 6787],
+        [474, 3145, 474],
+        [0, 0, 0],
+    ],
+    // py=1
+    [
+        [0, 0, 0],
+        [474, 3145, 474],
+        [6787, 27370, 6787],
+        [3145, 14093, 3145],
+        [0, 116, 0],
+    ],
+];
+
+use super::super::{ModularBufferInfo, ModularGridKind};
+use crate::headers::frame_header::FrameHeader;
+use crate::image::Rect;
+
+fn get_pixel_global(
+    channel: &ModularBufferInfo,
+    frame_header: &FrameHeader,
+    x: isize,
+    y: isize,
+) -> i32 {
+    let (w, h) = channel.info.size;
+    let x = x.clamp(0, w as isize - 1) as usize;
+    let y = y.clamp(0, h as isize - 1) as usize;
+    if channel.grid_kind == ModularGridKind::None {
+        let grid_data = channel.buffer_grid[0].data.borrow();
+        if let Some(chan) = grid_data.as_ref() {
+            chan.data.row(y)[x]
+        } else {
+            0
+        }
+    } else {
+        let shift = channel.info.shift.unwrap_or((0, 0));
+        let grid_dim = channel.grid_kind.grid_dim(frame_header, shift);
+        let gx = x / grid_dim.0;
+        let gy = y / grid_dim.1;
+        let lx = x % grid_dim.0;
+        let ly = y % grid_dim.1;
+        let grid_idx = channel.get_grid_idx(channel.grid_kind, (gx, gy));
+        let grid_data = channel.buffer_grid[grid_idx].data.borrow();
+        if let Some(chan) = grid_data.as_ref() {
+            chan.data.row(ly)[lx]
+        } else {
+            0
+        }
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+pub fn smooth_2d_unsqueeze(
+    input: &ModularBufferInfo,
+    frame_header: &FrameHeader,
+    rect: Rect,
+    output: &mut Image<i32>,
+) {
+    let (xs, ys) = output.size();
+    let (in_xs, in_ys) = (rect.size.0 / 2, rect.size.1 / 2);
+    if in_xs == 0 || in_ys == 0 {
+        return;
+    }
+
+    let in_grid = if input.grid_kind == ModularGridKind::None {
+        0
+    } else {
+        let shift = input.info.shift.unwrap_or((0, 0));
+        let grid_dim = input.grid_kind.grid_dim(frame_header, shift);
+        let in_gx = (rect.origin.0 / 2) / grid_dim.0;
+        let in_gy = (rect.origin.1 / 2) / grid_dim.1;
+        input.get_grid_idx(input.grid_kind, (in_gx, in_gy))
+    };
+    let grid_data = input.buffer_grid[in_grid].data.borrow();
+    if grid_data.is_none() {
+        for y in 0..ys {
+            output.row_mut(y).fill(0);
+        }
+        return;
+    }
+    let in_grid_data = &grid_data.as_ref().unwrap().data;
+
+    let (row_offset, col_offset) = if input.grid_kind == ModularGridKind::None {
+        (rect.origin.1 / 2, rect.origin.0 / 2)
+    } else {
+        (0, 0)
+    };
+
+    let y_start = 4;
+    let y_end = if ys >= 4 { ys.min(2 * in_ys - 4) } else { 0 };
+
+    let x_start = 4;
+    let x_end = if xs >= 4 { xs.min(2 * in_xs - 4) } else { 0 };
+
+    let compute_border = |py: usize, px: usize, ix_center: isize, iy_center: isize| -> i32 {
+        let w = &WEIGHTS_2D[py * 2 + px];
+        let mut sum = 0i64;
+        let global_ix_center = (rect.origin.0 / 2) as isize + ix_center;
+        let global_iy_center = (rect.origin.1 / 2) as isize + iy_center;
+        for dy in -2isize..=2 {
+            let r_w = &w[(dy + 2) as usize];
+            let iy = global_iy_center + dy;
+            for dx in -2isize..=2 {
+                sum += get_pixel_global(input, frame_header, global_ix_center + dx, iy) as i64
+                    * r_w[(dx + 2) as usize] as i64;
+            }
+        }
+        let val = if sum >= 0 {
+            (sum + 32768) >> 16
+        } else {
+            (sum - 32768) >> 16
+        };
+        val as i32
+    };
+
+    for y in 0..ys {
+        let output_row = output.row_mut(y);
+        let py = y % 2;
+        let iy_center = y / 2;
+
+        if y < y_start || y >= y_end {
+            for x in 0..xs {
+                let px = x % 2;
+                let ix_center = x / 2;
+                output_row[x] = compute_border(py, px, ix_center as isize, iy_center as isize);
+            }
+        } else {
+            // Start border
+            for x in 0..x_start.min(xs) {
+                let px = x % 2;
+                let ix_center = x / 2;
+                output_row[x] = compute_border(py, px, ix_center as isize, iy_center as isize);
+            }
+
+            // Interior fast path
+            if x_start < x_end {
+                let r0 = in_grid_data.row(row_offset + iy_center - 2);
+                let r1 = in_grid_data.row(row_offset + iy_center - 1);
+                let r2 = in_grid_data.row(row_offset + iy_center);
+                let r3 = in_grid_data.row(row_offset + iy_center + 1);
+                let r4 = in_grid_data.row(row_offset + iy_center + 2);
+
+                for x in x_start..x_end {
+                    let px = x % 2;
+                    let ix_center = x / 2;
+                    let w = &WEIGHTS_2D[py * 2 + px];
+                    let sum = (r0[col_offset + ix_center - 2] as i64 * w[0][0] as i64)
+                        + (r0[col_offset + ix_center - 1] as i64 * w[0][1] as i64)
+                        + (r0[col_offset + ix_center] as i64 * w[0][2] as i64)
+                        + (r0[col_offset + ix_center + 1] as i64 * w[0][3] as i64)
+                        + (r0[col_offset + ix_center + 2] as i64 * w[0][4] as i64)
+                        + (r1[col_offset + ix_center - 2] as i64 * w[1][0] as i64)
+                        + (r1[col_offset + ix_center - 1] as i64 * w[1][1] as i64)
+                        + (r1[col_offset + ix_center] as i64 * w[1][2] as i64)
+                        + (r1[col_offset + ix_center + 1] as i64 * w[1][3] as i64)
+                        + (r1[col_offset + ix_center + 2] as i64 * w[1][4] as i64)
+                        + (r2[col_offset + ix_center - 2] as i64 * w[2][0] as i64)
+                        + (r2[col_offset + ix_center - 1] as i64 * w[2][1] as i64)
+                        + (r2[col_offset + ix_center] as i64 * w[2][2] as i64)
+                        + (r2[col_offset + ix_center + 1] as i64 * w[2][3] as i64)
+                        + (r2[col_offset + ix_center + 2] as i64 * w[2][4] as i64)
+                        + (r3[col_offset + ix_center - 2] as i64 * w[3][0] as i64)
+                        + (r3[col_offset + ix_center - 1] as i64 * w[3][1] as i64)
+                        + (r3[col_offset + ix_center] as i64 * w[3][2] as i64)
+                        + (r3[col_offset + ix_center + 1] as i64 * w[3][3] as i64)
+                        + (r3[col_offset + ix_center + 2] as i64 * w[3][4] as i64)
+                        + (r4[col_offset + ix_center - 2] as i64 * w[4][0] as i64)
+                        + (r4[col_offset + ix_center - 1] as i64 * w[4][1] as i64)
+                        + (r4[col_offset + ix_center] as i64 * w[4][2] as i64)
+                        + (r4[col_offset + ix_center + 1] as i64 * w[4][3] as i64)
+                        + (r4[col_offset + ix_center + 2] as i64 * w[4][4] as i64);
+                    let val = if sum >= 0 {
+                        (sum + 32768) >> 16
+                    } else {
+                        (sum - 32768) >> 16
+                    };
+                    output_row[x] = val as i32;
+                }
+            }
+
+            // End border
+            for x in x_start.max(x_end)..xs {
+                let px = x % 2;
+                let ix_center = x / 2;
+                output_row[x] = compute_border(py, px, ix_center as isize, iy_center as isize);
+            }
+        }
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+pub fn smooth_h_unsqueeze(
+    input: &ModularBufferInfo,
+    frame_header: &FrameHeader,
+    rect: Rect,
+    output: &mut Image<i32>,
+) {
+    let (xs, ys) = output.size();
+    let (in_xs, in_ys) = (rect.size.0 / 2, rect.size.1);
+    if in_xs == 0 || in_ys == 0 {
+        return;
+    }
+
+    let in_grid = if input.grid_kind == ModularGridKind::None {
+        0
+    } else {
+        let shift = input.info.shift.unwrap_or((0, 0));
+        let grid_dim = input.grid_kind.grid_dim(frame_header, shift);
+        let in_gx = (rect.origin.0 / 2) / grid_dim.0;
+        let in_gy = rect.origin.1 / grid_dim.1;
+        input.get_grid_idx(input.grid_kind, (in_gx, in_gy))
+    };
+    let grid_data = input.buffer_grid[in_grid].data.borrow();
+    if grid_data.is_none() {
+        for y in 0..ys {
+            output.row_mut(y).fill(0);
+        }
+        return;
+    }
+    let in_grid_data = &grid_data.as_ref().unwrap().data;
+
+    let (row_offset, col_offset) = if input.grid_kind == ModularGridKind::None {
+        (rect.origin.1, rect.origin.0 / 2)
+    } else {
+        (0, 0)
+    };
+
+    let y_start = 1;
+    let y_end = if ys >= 1 { ys.min(in_ys - 1) } else { 0 };
+
+    let x_start = 4;
+    let x_end = if xs >= 4 { xs.min(2 * in_xs - 4) } else { 0 };
+
+    let compute_border = |px: usize, ix_center: isize, iy_center: isize| -> i32 {
+        let w = &WEIGHTS_H[px];
+        let mut sum = 0i64;
+        let global_ix_center = (rect.origin.0 / 2) as isize + ix_center;
+        let global_iy_center = rect.origin.1 as isize + iy_center;
+        for dy in -1isize..=1 {
+            let r_w = &w[(dy + 1) as usize];
+            let iy = global_iy_center + dy;
+            for dx in -2isize..=2 {
+                sum += get_pixel_global(input, frame_header, global_ix_center + dx, iy) as i64
+                    * r_w[(dx + 2) as usize] as i64;
+            }
+        }
+        let val = if sum >= 0 {
+            (sum + 32768) >> 16
+        } else {
+            (sum - 32768) >> 16
+        };
+        val as i32
+    };
+
+    for y in 0..ys {
+        let output_row = output.row_mut(y);
+        let iy_center = y;
+
+        if y < y_start || y >= y_end {
+            for x in 0..xs {
+                let px = x % 2;
+                let ix_center = x / 2;
+                output_row[x] = compute_border(px, ix_center as isize, iy_center as isize);
+            }
+        } else {
+            // Start border
+            for x in 0..x_start.min(xs) {
+                let px = x % 2;
+                let ix_center = x / 2;
+                output_row[x] = compute_border(px, ix_center as isize, iy_center as isize);
+            }
+
+            // Interior fast path
+            if x_start < x_end {
+                let r0 = in_grid_data.row(row_offset + iy_center - 1);
+                let r1 = in_grid_data.row(row_offset + iy_center);
+                let r2 = in_grid_data.row(row_offset + iy_center + 1);
+
+                for x in x_start..x_end {
+                    let px = x % 2;
+                    let ix_center = x / 2;
+                    let w = &WEIGHTS_H[px];
+                    let sum = (r0[col_offset + ix_center - 2] as i64 * w[0][0] as i64)
+                        + (r0[col_offset + ix_center - 1] as i64 * w[0][1] as i64)
+                        + (r0[col_offset + ix_center] as i64 * w[0][2] as i64)
+                        + (r0[col_offset + ix_center + 1] as i64 * w[0][3] as i64)
+                        + (r0[col_offset + ix_center + 2] as i64 * w[0][4] as i64)
+                        + (r1[col_offset + ix_center - 2] as i64 * w[1][0] as i64)
+                        + (r1[col_offset + ix_center - 1] as i64 * w[1][1] as i64)
+                        + (r1[col_offset + ix_center] as i64 * w[1][2] as i64)
+                        + (r1[col_offset + ix_center + 1] as i64 * w[1][3] as i64)
+                        + (r1[col_offset + ix_center + 2] as i64 * w[1][4] as i64)
+                        + (r2[col_offset + ix_center - 2] as i64 * w[2][0] as i64)
+                        + (r2[col_offset + ix_center - 1] as i64 * w[2][1] as i64)
+                        + (r2[col_offset + ix_center] as i64 * w[2][2] as i64)
+                        + (r2[col_offset + ix_center + 1] as i64 * w[2][3] as i64)
+                        + (r2[col_offset + ix_center + 2] as i64 * w[2][4] as i64);
+                    let val = if sum >= 0 {
+                        (sum + 32768) >> 16
+                    } else {
+                        (sum - 32768) >> 16
+                    };
+                    output_row[x] = val as i32;
+                }
+            }
+
+            // End border
+            for x in x_start.max(x_end)..xs {
+                let px = x % 2;
+                let ix_center = x / 2;
+                output_row[x] = compute_border(px, ix_center as isize, iy_center as isize);
+            }
+        }
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+pub fn smooth_v_unsqueeze(
+    input: &ModularBufferInfo,
+    frame_header: &FrameHeader,
+    rect: Rect,
+    output: &mut Image<i32>,
+) {
+    let (xs, ys) = output.size();
+    let (in_xs, in_ys) = (rect.size.0, rect.size.1 / 2);
+    if in_xs == 0 || in_ys == 0 {
+        return;
+    }
+
+    let in_grid = if input.grid_kind == ModularGridKind::None {
+        0
+    } else {
+        let shift = input.info.shift.unwrap_or((0, 0));
+        let grid_dim = input.grid_kind.grid_dim(frame_header, shift);
+        let in_gx = rect.origin.0 / grid_dim.0;
+        let in_gy = (rect.origin.1 / 2) / grid_dim.1;
+        input.get_grid_idx(input.grid_kind, (in_gx, in_gy))
+    };
+    let grid_data = input.buffer_grid[in_grid].data.borrow();
+    if grid_data.is_none() {
+        for y in 0..ys {
+            output.row_mut(y).fill(0);
+        }
+        return;
+    }
+    let in_grid_data = &grid_data.as_ref().unwrap().data;
+
+    let (row_offset, col_offset) = if input.grid_kind == ModularGridKind::None {
+        (rect.origin.1 / 2, rect.origin.0)
+    } else {
+        (0, 0)
+    };
+
+    let y_start = 4;
+    let y_end = if ys >= 4 { ys.min(2 * in_ys - 4) } else { 0 };
+
+    let x_start = 1;
+    let x_end = if xs >= 1 { xs.min(in_xs - 1) } else { 0 };
+
+    let compute_border = |py: usize, ix_center: isize, iy_center: isize| -> i32 {
+        let w = &WEIGHTS_V[py];
+        let mut sum = 0i64;
+        let global_ix_center = rect.origin.0 as isize + ix_center;
+        let global_iy_center = (rect.origin.1 / 2) as isize + iy_center;
+        for dy in -2isize..=2 {
+            let r_w = &w[(dy + 2) as usize];
+            let iy = global_iy_center + dy;
+            for dx in -1isize..=1 {
+                sum += get_pixel_global(input, frame_header, global_ix_center + dx, iy) as i64
+                    * r_w[(dx + 1) as usize] as i64;
+            }
+        }
+        let val = if sum >= 0 {
+            (sum + 32768) >> 16
+        } else {
+            (sum - 32768) >> 16
+        };
+        val as i32
+    };
+
+    for y in 0..ys {
+        let output_row = output.row_mut(y);
+        let py = y % 2;
+        let iy_center = y / 2;
+
+        if y < y_start || y >= y_end {
+            for x in 0..xs {
+                let ix_center = x;
+                output_row[x] = compute_border(py, ix_center as isize, iy_center as isize);
+            }
+        } else {
+            // Start border
+            for x in 0..x_start.min(xs) {
+                let ix_center = x;
+                output_row[x] = compute_border(py, ix_center as isize, iy_center as isize);
+            }
+
+            // Interior fast path
+            if x_start < x_end {
+                let r0 = in_grid_data.row(row_offset + iy_center - 2);
+                let r1 = in_grid_data.row(row_offset + iy_center - 1);
+                let r2 = in_grid_data.row(row_offset + iy_center);
+                let r3 = in_grid_data.row(row_offset + iy_center + 1);
+                let r4 = in_grid_data.row(row_offset + iy_center + 2);
+
+                for x in x_start..x_end {
+                    let ix_center = x;
+                    let w = &WEIGHTS_V[py];
+                    let sum = (r0[col_offset + ix_center - 1] as i64 * w[0][0] as i64)
+                        + (r0[col_offset + ix_center] as i64 * w[0][1] as i64)
+                        + (r0[col_offset + ix_center + 1] as i64 * w[0][2] as i64)
+                        + (r1[col_offset + ix_center - 1] as i64 * w[1][0] as i64)
+                        + (r1[col_offset + ix_center] as i64 * w[1][1] as i64)
+                        + (r1[col_offset + ix_center + 1] as i64 * w[1][2] as i64)
+                        + (r2[col_offset + ix_center - 1] as i64 * w[2][0] as i64)
+                        + (r2[col_offset + ix_center] as i64 * w[2][1] as i64)
+                        + (r2[col_offset + ix_center + 1] as i64 * w[2][2] as i64)
+                        + (r3[col_offset + ix_center - 1] as i64 * w[3][0] as i64)
+                        + (r3[col_offset + ix_center] as i64 * w[3][1] as i64)
+                        + (r3[col_offset + ix_center + 1] as i64 * w[3][2] as i64)
+                        + (r4[col_offset + ix_center - 1] as i64 * w[4][0] as i64)
+                        + (r4[col_offset + ix_center] as i64 * w[4][1] as i64)
+                        + (r4[col_offset + ix_center + 1] as i64 * w[4][2] as i64);
+                    let val = if sum >= 0 {
+                        (sum + 32768) >> 16
+                    } else {
+                        (sum - 32768) >> 16
+                    };
+                    output_row[x] = val as i32;
+                }
+            }
+
+            // End border
+            for x in x_start.max(x_end)..xs {
+                let ix_center = x as isize;
+                output_row[x] = compute_border(py, ix_center, iy_center as isize);
+            }
+        }
+    }
+}
