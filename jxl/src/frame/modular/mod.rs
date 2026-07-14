@@ -477,9 +477,8 @@ impl FullModularImage {
             buffer_info,
             transform_steps,
             section_buffer_indices,
-            can_do_partial_render: !has_problematic_palette_transform,
-            can_do_early_partial_render: !has_problematic_palette_transform
-                && has_squeeze_transform,
+            can_do_partial_render: true,
+            can_do_early_partial_render: has_squeeze_transform,
             needed_section0_channels_for_early_render: num_channels + num_meta_channels,
             has_decoded_data: false,
             global_header: Some(header),
