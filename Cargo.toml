@@ -4,11 +4,24 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
+[profile.dev]
+debug-assertions = true
+overflow-checks = true
+opt-level = 1
+panic = "abort"
+
 [profile.bench]
 debug = true
 
 [workspace]
-members = ["jxl", "jxl_cli", "jxl_cms", "jxl_macros", "jxl_simd", "jxl_transforms"]
+members = [
+  "jxl",
+  "jxl_cli",
+  "jxl_cms",
+  "jxl_macros",
+  "jxl_simd",
+  "jxl_transforms",
+]
 resolver = "2"
 
 [workspace.lints.clippy]
