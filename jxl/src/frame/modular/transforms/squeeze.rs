@@ -685,13 +685,13 @@ fn convolve_2d_simd<D: SimdDescriptor>(
     d: D,
     n: &[D::F32Vec; 25],
 ) -> (D::I32Vec, D::I32Vec, D::I32Vec, D::I32Vec) {
-    let w_7 = D::F32Vec::splat(d, 4.0 / 65536.0);
-    let w_93 = D::F32Vec::splat(d, 64.0 / 65536.0);
-    let w_1188 = D::F32Vec::splat(d, 512.0 / 65536.0);
-    let w_2842 = D::F32Vec::splat(d, 1536.0 / 65536.0);
-    let w_6175 = D::F32Vec::splat(d, 1024.0 / 65536.0);
+    let w_7 = D::F32Vec::splat(d, 128.0 / 65536.0);
+    let w_93 = D::F32Vec::splat(d, 256.0 / 65536.0);
+    let w_1188 = D::F32Vec::splat(d, 1024.0 / 65536.0);
+    let w_2842 = D::F32Vec::splat(d, 2048.0 / 65536.0);
+    let w_6175 = D::F32Vec::splat(d, 4096.0 / 65536.0);
     let w_12905 = D::F32Vec::splat(d, 8192.0 / 65536.0);
-    let w_25198 = D::F32Vec::splat(d, 38912.0 / 65536.0);
+    let w_25198 = D::F32Vec::splat(d, 32768.0 / 65536.0);
 
     let mut sum_0_0_a = D::F32Vec::zero(d);
     let mut sum_0_0_b = D::F32Vec::zero(d);
@@ -801,10 +801,10 @@ fn convolve_2d_simd<D: SimdDescriptor>(
 #[inline(always)]
 fn convolve_1d_simd<D: SimdDescriptor>(d: D, n: &[D::F32Vec; 15]) -> (D::I32Vec, D::I32Vec) {
     let w_116 = D::F32Vec::splat(d, 64.0 / 65536.0);
-    let w_474 = D::F32Vec::splat(d, 256.0 / 65536.0);
-    let w_3145 = D::F32Vec::splat(d, 2048.0 / 65536.0);
-    let w_6787 = D::F32Vec::splat(d, 6144.0 / 65536.0);
-    let w_14093 = D::F32Vec::splat(d, 12288.0 / 65536.0);
+    let w_474 = D::F32Vec::splat(d, 512.0 / 65536.0);
+    let w_3145 = D::F32Vec::splat(d, 4096.0 / 65536.0);
+    let w_6787 = D::F32Vec::splat(d, 12288.0 / 65536.0);
+    let w_14093 = D::F32Vec::splat(d, 24576.0 / 65536.0);
     let w_27370 = D::F32Vec::splat(d, 32768.0 / 65536.0);
 
     let mut sum_even_a = D::F32Vec::zero(d);
