@@ -520,17 +520,17 @@ simd_function!(
         let zero = D::F32Vec::splat(d, 0.0);
         let scale = D::F32Vec::splat(d, max);
 
-        let y_off = (y0 + channel * 13) % 32;
-        let x_off = (x0 + channel * 23) % 32;
-
         for block in 0..xsize.div_ceil(simd_width) {
             let x = block * simd_width;
 
             let val = D::F32Vec::load(d, &input[x..]);
 
+            let dither_x = (x0 + x + channel * 23) % 32;
+            let dither_y = (y0 + channel * 13) % 32;
+
             let dither = D::F32Vec::load(
                 d,
-                &K_DITHER[y_off * 48 + x_off + x..],
+                &K_DITHER[dither_y * 48 + dither_x..],
             );
 
             let scaled = val * scale;
