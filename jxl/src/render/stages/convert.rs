@@ -549,62 +549,7 @@ impl RenderPipelineInOutStage for ConvertF32ToU8Stage {
     }
 }
 
-// SIMD F32 to U8 conversion
-// simd_function!(
-//     f32_to_u8_simd_dispatch,
-//     d: D,
-//     fn f32_to_u8_simd(input: &[f32], output: &mut [u8], max: f32, xsize: usize) {
-//         let simd_width = D::F32Vec::LEN;
-//         let zero = D::F32Vec::splat(d, 0.0);
-//         let one = D::F32Vec::splat(d, 1.0);
-//         let scale = D::F32Vec::splat(d, max);
 
-//         // Process SIMD vectors using div_ceil (buffers are padded)
-//         for (input_chunk, output_chunk) in input
-//             .chunks_exact(simd_width)
-//             .zip(output.chunks_exact_mut(simd_width))
-//             .take(xsize.div_ceil(simd_width))
-//         {
-//             let val = D::F32Vec::load(d, input_chunk);
-//             // Clamp to [0, 1] and scale
-//             let clamped = val.max(zero).min(one);
-//             let scaled = clamped * scale;
-//             scaled.round_store_u8(output_chunk);
-//         }
-//     }
-// );
-
-impl RenderPipelineInOutStage for ConvertF32ToU8Stage {
-    type InputT = f32;
-    type OutputT = u8;
-    const SHIFT: (u8, u8) = (0, 0);
-    const BORDER: (u8, u8) = (0, 0);
-
-    fn uses_channel(&self, c: usize) -> bool {
-        c == self.channel
-    }
-
-    fn process_row_chunk(
-        &self,
-        _position: (usize, usize),
-        xsize: usize,
-        input_rows: &Channels<f32>,
-        output_rows: &mut ChannelsMut<u8>,
-        _state: Option<&mut dyn std::any::Any>,
-    ) {
-        let input = input_rows[0][0];
-        let output = &mut output_rows[0][0];
-        let max = ((1u32 << self.bit_depth) - 1) as f32;
-        f32_to_u8_simd_dispatch(input, output, max, xsize);
-    }
-
-    fn is_special_case(&self) -> Option<StageSpecialCase> {
-        Some(StageSpecialCase::F32ToU8 {
-            channel: self.channel,
-            bit_depth: self.bit_depth,
-        })
-    }
-}
 
 /// Stage that converts i32 values to u8 values, applying a multiplier.
 pub struct ConvertI32ToU8Stage {
