@@ -495,16 +495,52 @@ impl std::fmt::Display for ConvertF32ToU8Stage {
         write!(
             f,
             "convert F32 to U8 in channel {} with bit depth {}",
-            self.channel,
-            self.bit_depth
+            self.channel, self.bit_depth
         )
     }
 }
 
+simd_function!(
+    f32_to_u8_simd_dispatch,
+    d: D,
+    fn f32_to_u8_simd(
+        input: &[f32],
+        output: &mut [u8],
+        max: f32,
+        x0: usize,
+        y0: usize,
+        channel: usize,
+        xsize: usize,
+    ) {
+        let simd_width = D::F32Vec::LEN;
+        let zero = D::F32Vec::splat(d, 0.0);
+        let scale = D::F32Vec::splat(d, max);
+
+        let y_off = (y0 + channel * 13) % 32;
+        let x_off = (x0 + channel * 23) % 32;
+
+        for block in 0..xsize.div_ceil(simd_width) {
+            let x = block * simd_width;
+
+            let val = D::F32Vec::load(d, &input[x..]);
+
+            let dither = D::F32Vec::load(
+                d,
+                &K_DITHER[y_off * 48 + x_off + x..],
+            );
+
+            let scaled = val * scale;
+            let dithered = scaled + dither;
+            let clamped = dithered.max(zero).min(scale);
+
+            clamped.round_store_u8(&mut output[x..]);
+        }
+    }
+);
+
 impl RenderPipelineInOutStage for ConvertF32ToU8Stage {
     type InputT = f32;
     type OutputT = u8;
-
     const SHIFT: (u8, u8) = (0, 0);
     const BORDER: (u8, u8) = (0, 0);
 
@@ -521,24 +557,18 @@ impl RenderPipelineInOutStage for ConvertF32ToU8Stage {
         _state: Option<&mut dyn std::any::Any>,
     ) {
         let (x0, y0) = position;
-
         let input = input_rows[0][0];
         let output = &mut output_rows[0][0];
-
-        let mul = ((1u32 << self.bit_depth) - 1) as f32;
-
-        let y_off = (y0 + self.channel * 13) & 31;
-
-        for i in 0..xsize {
-            let x_off = (x0 + i + self.channel * 23) & 31;
-            let dither = K_DITHER[y_off * 48 + x_off];
-
-            let mut v = input[i] * mul;
-            v += dither;
-            v = v.clamp(0.0, mul);
-
-            output[i] = v.round() as u8;
-        }
+        let max = ((1u32 << self.bit_depth) - 1) as f32;
+        f32_to_u8_simd_dispatch(
+            input,
+            output,
+            max,
+            x0,
+            y0,
+            self.channel,
+            xsize,
+        );
     }
 
     fn is_special_case(&self) -> Option<StageSpecialCase> {
@@ -548,8 +578,6 @@ impl RenderPipelineInOutStage for ConvertF32ToU8Stage {
         })
     }
 }
-
-
 
 /// Stage that converts i32 values to u8 values, applying a multiplier.
 pub struct ConvertI32ToU8Stage {
