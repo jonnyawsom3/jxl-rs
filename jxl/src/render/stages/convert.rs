@@ -489,8 +489,8 @@ pub struct ConvertF32ToU8Stage {
 }
 
 impl ConvertF32ToU8Stage {
-    pub fn new(channel: usize, bit_depth: u8) -> Self {
-        Self { channel, bit_depth }
+    pub fn new(channel: usize, bit_depth: u8) -> ConvertF32ToU8Stage {
+        ConvertF32ToU8Stage { channel, bit_depth }
     }
 }
 
@@ -504,6 +504,7 @@ impl std::fmt::Display for ConvertF32ToU8Stage {
     }
 }
 
+// SIMD F32 to U8 conversion
 simd_function!(
     f32_to_u8_simd_dispatch,
     d: D,
@@ -522,21 +523,16 @@ simd_function!(
 
         for block in 0..xsize.div_ceil(simd_width) {
             let x = block * simd_width;
-
             let val = D::F32Vec::load(d, &input[x..]);
-
             let dither_x = (x0 + x + channel * 23) % 32;
             let dither_y = (y0 + channel * 13) % 32;
-
             let dither = D::F32Vec::load(
                 d,
                 &K_DITHER[dither_y * 48 + dither_x..],
             );
-
             let scaled = val * scale;
             let dithered = scaled + dither;
             let clamped = dithered.max(zero).min(scale);
-
             clamped.round_store_u8(&mut output[x..]);
         }
     }
@@ -554,16 +550,25 @@ impl RenderPipelineInOutStage for ConvertF32ToU8Stage {
 
     fn process_row_chunk(
         &self,
-        position: (usize, usize),
+        _position: (usize, usize),
         xsize: usize,
         input_rows: &Channels<f32>,
         output_rows: &mut ChannelsMut<u8>,
         _state: Option<&mut dyn std::any::Any>,
     ) {
-        let (x0, y0) = position;
+        let (x0, y0) = _position;
         let input = input_rows[0][0];
         let output = &mut output_rows[0][0];
         let max = ((1u32 << self.bit_depth) - 1) as f32;
+        let y_off = (y0 + self.channel * 13) & 31;
+        for i in 0..xsize {
+            let x_off = (x0 + i + self.channel * 23) & 31;
+            let dither = K_DITHER[y_off * 48 + x_off];
+            let mut v = input[i] * max;
+            v += dither;
+            v = v.clamp(0.0, max);
+            output[i] = v.round() as u8;
+        }
         f32_to_u8_simd_dispatch(
             input,
             output,
