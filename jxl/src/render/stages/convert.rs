@@ -472,23 +472,27 @@ impl std::fmt::Display for ConvertF32ToU8Stage {
 simd_function!(
     f32_to_u8_simd_dispatch,
     d: D,
-    #[allow(clippy::too_many_arguments)]
     fn f32_to_u8_simd(
         input: &[f32],
         output: &mut [u8],
         max: f32,
-        x0: usize,
-        y0: usize,
+        position: (usize, usize),
         channel: usize,
         xsize: usize,
     ) {
         let simd_width = D::F32Vec::LEN;
         let zero = D::F32Vec::splat(d, 0.0);
         let scale = D::F32Vec::splat(d, max);
+        let (x0, y0) = position;
 
-        for block in 0..xsize.div_ceil(simd_width) {
+        for (block, (input_chunk, output_chunk)) in input
+            .chunks_exact(simd_width)
+            .zip(output.chunks_exact_mut(simd_width))
+            .take(xsize.div_ceil(simd_width))
+            .enumerate()
+        {
             let x = block * simd_width;
-            let val = D::F32Vec::load(d, &input[x..]);
+            let val = D::F32Vec::load(d, input_chunk);
             let dither_x = (x0 + x + channel * 23) % 32;
             let dither_y = (y0 + channel * 13) % 32;
             let dither = D::F32Vec::load(
@@ -498,34 +502,24 @@ simd_function!(
             let scaled = val * scale;
             let dithered = scaled + dither;
             let clamped = dithered.max(zero).min(scale);
-            clamped.round_store_u8(&mut output[x..]);
+            clamped.round_store_u8(output_chunk);
         }
     }
 );
 
 impl RenderPipelineInOutStage for ConvertF32ToU8Stage {
-    type InputT = f32;
-    type OutputT = u8;
-    const SHIFT: (u8, u8) = (0, 0);
-    const BORDER: (u8, u8) = (0, 0);
-
-    fn uses_channel(&self, c: usize) -> bool {
-        c == self.channel
-    }
-
-    fn process_row_chunk(
+    fn process_row(
         &self,
-        _position: (usize, usize),
-        xsize: usize,
-        input_rows: &Channels<f32>,
+        input_rows: &Channels<u8>,
         output_rows: &mut ChannelsMut<u8>,
+        position: (usize, usize),
+        xsize: usize,
         _state: Option<&mut dyn std::any::Any>,
     ) {
-        let (x0, y0) = _position;
         let input = input_rows[0][0];
         let output = &mut output_rows[0][0];
         let max = ((1u32 << self.bit_depth) - 1) as f32;
-        f32_to_u8_simd_dispatch(input, output, max, x0, y0, self.channel, xsize);
+        f32_to_u8_simd_dispatch(input, output, max, position, self.channel, xsize);
     }
 
     fn is_special_case(&self) -> Option<StageSpecialCase> {
