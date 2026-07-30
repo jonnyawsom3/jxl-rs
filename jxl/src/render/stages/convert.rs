@@ -560,15 +560,6 @@ impl RenderPipelineInOutStage for ConvertF32ToU8Stage {
         let input = input_rows[0][0];
         let output = &mut output_rows[0][0];
         let max = ((1u32 << self.bit_depth) - 1) as f32;
-        let y_off = (y0 + self.channel * 13) & 31;
-        for i in 0..xsize {
-            let x_off = (x0 + i + self.channel * 23) & 31;
-            let dither = K_DITHER[y_off * 48 + x_off];
-            let mut v = input[i] * max;
-            v += dither;
-            v = v.clamp(0.0, max);
-            output[i] = v.round() as u8;
-        }
         f32_to_u8_simd_dispatch(
             input,
             output,
