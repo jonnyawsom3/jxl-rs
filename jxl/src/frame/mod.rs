@@ -18,7 +18,7 @@ use crate::{
         toc::Toc,
     },
     image::Image,
-    util::tracing_wrappers::*,
+    util::{PerThreadStorage, tracing_wrappers::*},
 };
 use adaptive_lf_smoothing::adaptive_lf_smoothing;
 use block_context_map::BlockContextMap;
@@ -70,7 +70,7 @@ pub struct HfGlobalState {
     num_histograms: u32,
     passes: Vec<PassState>,
     dequant_matrices: DequantMatrices,
-    hf_coefficients: Option<(Image<i32>, Image<i32>, Image<i32>)>,
+    hf_coefficients: Vec<AtomicRefCell<Vec<i32>>>,
 }
 
 #[derive(Debug)]
@@ -239,14 +239,14 @@ pub struct Frame {
     #[cfg(test)]
     use_simple_pipeline: bool,
     #[cfg(test)]
-    render_pipeline: Option<Box<dyn std::any::Any>>,
+    render_pipeline: Option<Box<dyn std::any::Any + Send + Sync>>,
     #[cfg(not(test))]
     render_pipeline: Option<Box<crate::render::LowMemoryRenderPipeline>>,
     reference_frame_data: Option<Vec<Image<f32>>>,
     lf_frame_data: Option<[Image<f32>; 3]>,
     section0_render_up_to_date: bool,
     /// Reusable buffers for VarDCT group decoding.
-    vardct_buffers: Option<group::VarDctBuffers>,
+    vardct_buffers: PerThreadStorage<group::VarDctBuffers>,
     group_status: GroupStatus,
     patches: Arc<AtomicRefCell<PatchesDictionary>>,
     splines: Arc<AtomicRefCell<Splines>>,
