@@ -7,6 +7,7 @@ use crate::api::JxlColorProfile;
 use crate::api::JxlColorType;
 use crate::api::JxlDataFormat;
 use crate::api::JxlOutputBuffer;
+use crate::api::JxlParallelRunner;
 use crate::bit_reader::BitReader;
 use crate::error::{Error, Result};
 use crate::features::epf::SigmaSource;
@@ -24,6 +25,8 @@ use crate::image::Rect;
 use crate::util::AtomicRefCell;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 #[cfg(test)]
 use crate::render::SimpleRenderPipeline;
@@ -150,6 +153,7 @@ impl Frame {
         groups: Vec<(usize, Vec<(usize, BitReader)>)>,
         do_flush: bool,
         output_profile: &JxlColorProfile,
+        parallel_runner: &mut dyn JxlParallelRunner,
     ) -> Result<bool> {
         if !do_flush && groups.is_empty() {
             // Nothing to do.
@@ -397,6 +401,7 @@ impl Frame {
             .collect();
 
         // STEP 4: actually run the steps.
+
         let pass_to_pipeline = |chan, group, complete, image: Image<i32>| {
             pipeline!(
                 self,
@@ -406,8 +411,8 @@ impl Frame {
             Ok(())
         };
 
-        for s in render_steps.iter() {
-            match s {
+        let run_step = |i| {
+            match &render_steps[i] {
                 RenderStep::Decode { group, passes } => {
                     let mut passes = passes.borrow_mut();
                     self.decode_hf_group(*group, &mut passes, &buffer_splitter, do_flush)?;
@@ -424,6 +429,29 @@ impl Frame {
                         .run_transforms(&self.header, &pass_to_pipeline, &mut steps)?;
                 }
             }
+            Ok(())
+        };
+
+        // Avoid significantly more than one thread per full group
+        let max_threads = (self.header.size().0 / self.header.group_dim())
+            * (self.header.size().1 / self.header.group_dim())
+            + 1;
+
+        let hw_threads = std::thread::available_parallelism()
+            .map(|x| x.get())
+            .unwrap_or(max_threads);
+
+        if render_steps.len() > max_threads && max_threads < hw_threads {
+            let next_index = AtomicUsize::new(0);
+            parallel_runner.run(max_threads, &|_| loop {
+                let t = next_index.fetch_add(1, Ordering::Relaxed);
+                if t >= render_steps.len() {
+                    return Ok(());
+                }
+                run_step(t)?;
+            })?;
+        } else {
+            parallel_runner.run(render_steps.len(), &run_step)?;
         }
 
         for g in render_steps.iter().filter_map(|x| match x {
