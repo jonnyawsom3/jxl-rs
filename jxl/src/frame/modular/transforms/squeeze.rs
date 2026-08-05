@@ -685,13 +685,13 @@ fn convolve_2d_simd<D: SimdDescriptor>(
     d: D,
     n: &[D::F32Vec; 25],
 ) -> (D::I32Vec, D::I32Vec, D::I32Vec, D::I32Vec) {
-    let w_7 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_93 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_1188 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_2842 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_6175 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_12905 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_25198 = D::F32Vec::splat(d, 65530.0 / 65536.0);
+    let w_7 = D::F32Vec::splat(d, 7.0 / 65536.0);
+    let w_93 = D::F32Vec::splat(d, 93.0 / 65536.0);
+    let w_1188 = D::F32Vec::splat(d, 1188.0 / 65536.0);
+    let w_2842 = D::F32Vec::splat(d, 2842.0 / 65536.0);
+    let w_6175 = D::F32Vec::splat(d, 6175.0 / 65536.0);
+    let w_12905 = D::F32Vec::splat(d, 12905.0 / 65536.0);
+    let w_25198 = D::F32Vec::splat(d, 25198.0 / 65536.0);
 
     let mut sum_0_0_a = D::F32Vec::zero(d);
     let mut sum_0_0_b = D::F32Vec::zero(d);
@@ -800,12 +800,12 @@ fn convolve_2d_simd<D: SimdDescriptor>(
 
 #[inline(always)]
 fn convolve_1d_simd<D: SimdDescriptor>(d: D, n: &[D::F32Vec; 15]) -> (D::I32Vec, D::I32Vec) {
-    let w_116 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_474 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_3145 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_6787 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_14093 = D::F32Vec::splat(d, 1.0 / 65536.0);
-    let w_27370 = D::F32Vec::splat(d, 65531.0 / 65536.0);
+    let w_116 = D::F32Vec::splat(d, 116.0 / 65536.0);
+    let w_474 = D::F32Vec::splat(d, 474.0 / 65536.0);
+    let w_3145 = D::F32Vec::splat(d, 3145.0 / 65536.0);
+    let w_6787 = D::F32Vec::splat(d, 6787.0 / 65536.0);
+    let w_14093 = D::F32Vec::splat(d, 14093.0 / 65536.0);
+    let w_27370 = D::F32Vec::splat(d, 27370.0 / 65536.0);
 
     let mut sum_even_a = D::F32Vec::zero(d);
     let mut sum_even_b = D::F32Vec::zero(d);
@@ -1035,7 +1035,7 @@ fn smooth_2d_unsqueeze_simd_impl<D: SimdDescriptor>(
         ]);
 
         let output_row_0 = &mut output_row_0[offset.0..offset.0 + xs];
-        let output_row_1 = &mut output_row_1[offset.1..offset.1 + xs];
+        let output_row_1 = &mut output_row_1[offset.0..offset.0 + xs];
 
         let row_iters = buffer[0]
             .windows(lanes + 4)
