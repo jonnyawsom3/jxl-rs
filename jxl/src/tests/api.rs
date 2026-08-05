@@ -765,6 +765,17 @@ fn test_fuzzer_smallbuffer_overflow() {
     }
 }
 
+/// Regression test for https://issues.chromium.org/issues/541318910: flushing a
+/// frame that does not support rendering before the last pass used to force an
+/// eager render of an incomplete group.
+#[test]
+fn flush_without_partial_render_support() {
+    let data = std::fs::read("resources/test/squeeze_empty_residual.jxl").unwrap();
+    for chunk_size in 1..=16 {
+        decode_internal(&data, chunk_size, false, true, None, None, None).unwrap();
+    }
+}
+
 fn make_box(ty: &[u8; 4], content: &[u8]) -> Vec<u8> {
     let len = (8 + content.len()) as u32;
     let mut buf = Vec::new();
