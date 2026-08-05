@@ -1035,7 +1035,7 @@ fn smooth_2d_unsqueeze_simd_impl<D: SimdDescriptor>(
         ]);
 
         let output_row_0 = &mut output_row_0[offset.0..offset.0 + xs];
-        let output_row_1 = &mut output_row_1[offset.0..offset.0 + xs];
+        let output_row_1 = &mut output_row_1[offset.1..offset.1 + xs];
 
         let row_iters = buffer[0]
             .windows(lanes + 4)
