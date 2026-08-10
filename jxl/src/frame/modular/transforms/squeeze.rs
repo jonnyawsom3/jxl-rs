@@ -684,35 +684,35 @@ fn convolve_2d_simd<D: SimdDescriptor>(
     d: D,
     n: &[D::F32Vec; 25],
 ) -> (D::I32Vec, D::I32Vec, D::I32Vec, D::I32Vec) {
-    let w_4 = D::F32Vec::splat(d, 4.0 / 65536.0);
-    let w_47 = D::F32Vec::splat(d, 47.0 / 65536.0);
-    let w_594 = D::F32Vec::splat(d, 594.0 / 65536.0);
-    let w_1421 = D::F32Vec::splat(d, 1421.0 / 65536.0);
-    let w_3088 = D::F32Vec::splat(d, 3088.0 / 65536.0);
-    let w_6453 = D::F32Vec::splat(d, 6453.0 / 65536.0);
-    let w_45367 = D::F32Vec::splat(d, 45367.0 / 65536.0);
+    let w_7 = D::F32Vec::splat(d, 7.0 / 65536.0);
+    let w_93 = D::F32Vec::splat(d, 93.0 / 65536.0);
+    let w_1188 = D::F32Vec::splat(d, 1188.0 / 65536.0);
+    let w_2842 = D::F32Vec::splat(d, 2842.0 / 65536.0);
+    let w_6175 = D::F32Vec::splat(d, 6175.0 / 65536.0);
+    let w_12905 = D::F32Vec::splat(d, 12905.0 / 65536.0);
+    let w_25198 = D::F32Vec::splat(d, 25198.0 / 65536.0);
 
     let mut sum_0_0_a = D::F32Vec::zero(d);
     let mut sum_0_0_b = D::F32Vec::zero(d);
     let mut sum_0_0_c = D::F32Vec::zero(d);
     let mut sum_0_0_d = D::F32Vec::zero(d);
 
-    sum_0_0_a = n[1].mul_add(w_4, sum_0_0_a);
-    sum_0_0_a = n[2].mul_add(w_47, sum_0_0_a);
-    sum_0_0_a = n[5].mul_add(w_4, sum_0_0_a);
-    sum_0_0_a = n[6].mul_add(w_3088, sum_0_0_a);
+    sum_0_0_a = n[1].mul_add(w_7, sum_0_0_a);
+    sum_0_0_a = n[2].mul_add(w_93, sum_0_0_a);
+    sum_0_0_a = n[5].mul_add(w_7, sum_0_0_a);
+    sum_0_0_a = n[6].mul_add(w_6175, sum_0_0_a);
 
-    sum_0_0_b = n[7].mul_add(w_6453, sum_0_0_b);
-    sum_0_0_b = n[8].mul_add(w_594, sum_0_0_b);
-    sum_0_0_b = n[10].mul_add(w_47, sum_0_0_b);
+    sum_0_0_b = n[7].mul_add(w_12905, sum_0_0_b);
+    sum_0_0_b = n[8].mul_add(w_1188, sum_0_0_b);
+    sum_0_0_b = n[10].mul_add(w_93, sum_0_0_b);
 
-    sum_0_0_c = n[11].mul_add(w_6453, sum_0_0_c);
-    sum_0_0_c = n[12].mul_add(w_45367, sum_0_0_c);
-    sum_0_0_c = n[13].mul_add(w_1421, sum_0_0_c);
+    sum_0_0_c = n[11].mul_add(w_12905, sum_0_0_c);
+    sum_0_0_c = n[12].mul_add(w_25198, sum_0_0_c);
+    sum_0_0_c = n[13].mul_add(w_2842, sum_0_0_c);
 
-    sum_0_0_d = n[16].mul_add(w_594, sum_0_0_d);
-    sum_0_0_d = n[17].mul_add(w_1421, sum_0_0_d);
-    sum_0_0_d = n[18].mul_add(w_47, sum_0_0_d);
+    sum_0_0_d = n[16].mul_add(w_1188, sum_0_0_d);
+    sum_0_0_d = n[17].mul_add(w_2842, sum_0_0_d);
+    sum_0_0_d = n[18].mul_add(w_93, sum_0_0_d);
 
     let sum_0_0 = (sum_0_0_a + sum_0_0_b) + (sum_0_0_c + sum_0_0_d);
 
@@ -721,22 +721,22 @@ fn convolve_2d_simd<D: SimdDescriptor>(
     let mut sum_0_1_c = D::F32Vec::zero(d);
     let mut sum_0_1_d = D::F32Vec::zero(d);
 
-    sum_0_1_a = n[2].mul_add(w_47, sum_0_1_a);
-    sum_0_1_a = n[3].mul_add(w_4, sum_0_1_a);
-    sum_0_1_a = n[6].mul_add(w_594, sum_0_1_a);
-    sum_0_1_a = n[7].mul_add(w_6453, sum_0_1_a);
+    sum_0_1_a = n[2].mul_add(w_93, sum_0_1_a);
+    sum_0_1_a = n[3].mul_add(w_7, sum_0_1_a);
+    sum_0_1_a = n[6].mul_add(w_1188, sum_0_1_a);
+    sum_0_1_a = n[7].mul_add(w_12905, sum_0_1_a);
 
-    sum_0_1_b = n[8].mul_add(w_3088, sum_0_1_b);
-    sum_0_1_b = n[9].mul_add(w_4, sum_0_1_b);
-    sum_0_1_b = n[11].mul_add(w_1421, sum_0_1_b);
+    sum_0_1_b = n[8].mul_add(w_6175, sum_0_1_b);
+    sum_0_1_b = n[9].mul_add(w_7, sum_0_1_b);
+    sum_0_1_b = n[11].mul_add(w_2842, sum_0_1_b);
 
-    sum_0_1_c = n[12].mul_add(w_45367, sum_0_1_c);
-    sum_0_1_c = n[13].mul_add(w_6453, sum_0_1_c);
-    sum_0_1_c = n[14].mul_add(w_47, sum_0_1_c);
+    sum_0_1_c = n[12].mul_add(w_25198, sum_0_1_c);
+    sum_0_1_c = n[13].mul_add(w_12905, sum_0_1_c);
+    sum_0_1_c = n[14].mul_add(w_93, sum_0_1_c);
 
-    sum_0_1_d = n[16].mul_add(w_47, sum_0_1_d);
-    sum_0_1_d = n[17].mul_add(w_1421, sum_0_1_d);
-    sum_0_1_d = n[18].mul_add(w_594, sum_0_1_d);
+    sum_0_1_d = n[16].mul_add(w_93, sum_0_1_d);
+    sum_0_1_d = n[17].mul_add(w_2842, sum_0_1_d);
+    sum_0_1_d = n[18].mul_add(w_1188, sum_0_1_d);
 
     let sum_0_1 = (sum_0_1_a + sum_0_1_b) + (sum_0_1_c + sum_0_1_d);
 
@@ -745,22 +745,22 @@ fn convolve_2d_simd<D: SimdDescriptor>(
     let mut sum_1_0_c = D::F32Vec::zero(d);
     let mut sum_1_0_d = D::F32Vec::zero(d);
 
-    sum_1_0_a = n[6].mul_add(w_594, sum_1_0_a);
-    sum_1_0_a = n[7].mul_add(w_1421, sum_1_0_a);
-    sum_1_0_a = n[8].mul_add(w_47, sum_1_0_a);
-    sum_1_0_a = n[10].mul_add(w_47, sum_1_0_a);
+    sum_1_0_a = n[6].mul_add(w_1188, sum_1_0_a);
+    sum_1_0_a = n[7].mul_add(w_2842, sum_1_0_a);
+    sum_1_0_a = n[8].mul_add(w_93, sum_1_0_a);
+    sum_1_0_a = n[10].mul_add(w_93, sum_1_0_a);
 
-    sum_1_0_b = n[11].mul_add(w_6453, sum_1_0_b);
-    sum_1_0_b = n[12].mul_add(w_45367, sum_1_0_b);
-    sum_1_0_b = n[13].mul_add(w_1421, sum_1_0_b);
+    sum_1_0_b = n[11].mul_add(w_12905, sum_1_0_b);
+    sum_1_0_b = n[12].mul_add(w_25198, sum_1_0_b);
+    sum_1_0_b = n[13].mul_add(w_2842, sum_1_0_b);
 
-    sum_1_0_c = n[15].mul_add(w_4, sum_1_0_c);
-    sum_1_0_c = n[16].mul_add(w_3088, sum_1_0_c);
-    sum_1_0_c = n[17].mul_add(w_6453, sum_1_0_c);
+    sum_1_0_c = n[15].mul_add(w_7, sum_1_0_c);
+    sum_1_0_c = n[16].mul_add(w_6175, sum_1_0_c);
+    sum_1_0_c = n[17].mul_add(w_12905, sum_1_0_c);
 
-    sum_1_0_d = n[18].mul_add(w_594, sum_1_0_d);
-    sum_1_0_d = n[21].mul_add(w_4, sum_1_0_d);
-    sum_1_0_d = n[22].mul_add(w_47, sum_1_0_d);
+    sum_1_0_d = n[18].mul_add(w_1188, sum_1_0_d);
+    sum_1_0_d = n[21].mul_add(w_7, sum_1_0_d);
+    sum_1_0_d = n[22].mul_add(w_93, sum_1_0_d);
 
     let sum_1_0 = (sum_1_0_a + sum_1_0_b) + (sum_1_0_c + sum_1_0_d);
 
@@ -769,22 +769,22 @@ fn convolve_2d_simd<D: SimdDescriptor>(
     let mut sum_1_1_c = D::F32Vec::zero(d);
     let mut sum_1_1_d = D::F32Vec::zero(d);
 
-    sum_1_1_a = n[6].mul_add(w_47, sum_1_1_a);
-    sum_1_1_a = n[7].mul_add(w_1421, sum_1_1_a);
-    sum_1_1_a = n[8].mul_add(w_594, sum_1_1_a);
-    sum_1_1_a = n[11].mul_add(w_1421, sum_1_1_a);
+    sum_1_1_a = n[6].mul_add(w_93, sum_1_1_a);
+    sum_1_1_a = n[7].mul_add(w_2842, sum_1_1_a);
+    sum_1_1_a = n[8].mul_add(w_1188, sum_1_1_a);
+    sum_1_1_a = n[11].mul_add(w_2842, sum_1_1_a);
 
-    sum_1_1_b = n[12].mul_add(w_45367, sum_1_1_b);
-    sum_1_1_b = n[13].mul_add(w_6453, sum_1_1_b);
-    sum_1_1_b = n[14].mul_add(w_47, sum_1_1_b);
+    sum_1_1_b = n[12].mul_add(w_25198, sum_1_1_b);
+    sum_1_1_b = n[13].mul_add(w_12905, sum_1_1_b);
+    sum_1_1_b = n[14].mul_add(w_93, sum_1_1_b);
 
-    sum_1_1_c = n[16].mul_add(w_594, sum_1_1_c);
-    sum_1_1_c = n[17].mul_add(w_6453, sum_1_1_c);
-    sum_1_1_c = n[18].mul_add(w_3088, sum_1_1_c);
+    sum_1_1_c = n[16].mul_add(w_1188, sum_1_1_c);
+    sum_1_1_c = n[17].mul_add(w_12905, sum_1_1_c);
+    sum_1_1_c = n[18].mul_add(w_6175, sum_1_1_c);
 
-    sum_1_1_d = n[19].mul_add(w_4, sum_1_1_d);
-    sum_1_1_d = n[22].mul_add(w_47, sum_1_1_d);
-    sum_1_1_d = n[23].mul_add(w_4, sum_1_1_d);
+    sum_1_1_d = n[19].mul_add(w_7, sum_1_1_d);
+    sum_1_1_d = n[22].mul_add(w_93, sum_1_1_d);
+    sum_1_1_d = n[23].mul_add(w_7, sum_1_1_d);
 
     let sum_1_1 = (sum_1_1_a + sum_1_1_b) + (sum_1_1_c + sum_1_1_d);
 
