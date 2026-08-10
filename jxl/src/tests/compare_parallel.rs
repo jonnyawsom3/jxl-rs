@@ -9,6 +9,20 @@ use crate::image::Image;
 use crate::tests::decode::{compare_frames, decode_internal};
 use std::path::Path;
 
+#[cfg(feature = "shuttle")]
+use shuttle::sync::Mutex;
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "shuttle")]
+use shuttle::thread;
+
+#[cfg(not(feature = "shuttle"))]
+use std::sync::Mutex;
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(not(feature = "shuttle"))]
+use std::thread;
+
 pub struct TestParallelRunner {
     pub max_threads: usize,
 }
@@ -22,10 +36,10 @@ impl JxlParallelRunner for TestParallelRunner {
             return Ok(());
         }
         let num_threads = self.max_threads.min(num);
-        let next_task = std::sync::atomic::AtomicUsize::new(0);
-        let error = std::sync::Mutex::new(None);
+        let next_task = AtomicUsize::new(0);
+        let error = Mutex::new(None);
 
-        std::thread::scope(|s| {
+        thread::scope(|s| {
             let mut handles = Vec::with_capacity(num_threads);
             for _ in 0..num_threads {
                 handles.push(s.spawn(|| {
@@ -33,7 +47,7 @@ impl JxlParallelRunner for TestParallelRunner {
                         if error.lock().unwrap().is_some() {
                             break;
                         }
-                        let task = next_task.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let task = next_task.fetch_add(1, Ordering::Relaxed);
                         if task >= num {
                             break;
                         }
@@ -86,7 +100,14 @@ pub fn run_oneshot(path: &Path) {
     }
 
     // Oneshot parallel decode
-    let mut runner = TestParallelRunner { max_threads: 4 };
+    let mut runner = TestParallelRunner {
+        // TEST_MAX_THREADS makes it possible to explore thread-count-dependent
+        // interleavings (in particular under shuttle).
+        max_threads: std::env::var("TEST_MAX_THREADS")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(4),
+    };
     let (_, par_frames) = decode_internal(
         &file,
         usize::MAX,
@@ -141,7 +162,14 @@ pub fn run_progressive(path: &Path) {
         };
 
     // Parallel progressive decode
-    let mut runner = TestParallelRunner { max_threads: 4 };
+    let mut runner = TestParallelRunner {
+        // TEST_MAX_THREADS makes it possible to explore thread-count-dependent
+        // interleavings (in particular under shuttle).
+        max_threads: std::env::var("TEST_MAX_THREADS")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(4),
+    };
     let _ = decode_internal(
         &file,
         chunk_size,
@@ -173,5 +201,56 @@ pub fn run_progressive(path: &Path) {
             idx, path
         );
         compare_frames(path, seq_f_idx, &par_bufs, &seq_bufs);
+    }
+}
+
+// Runs `f` under the shuttle scheduler selected via environment variables:
+// - default: random scheduling, SHUTTLE_ITERATIONS iterations (default 10);
+//   set SHUTTLE_RANDOM_SEED to replay a failure reported as "failing seed".
+// - SHUTTLE_SCHEDULER=pct: PCT scheduling with SHUTTLE_PCT_DEPTH preemptions
+//   (default 3), which finds some bugs random scheduling misses.
+// - SHUTTLE_SCHEDULER=replay: replays the schedule stored in the file pointed
+//   to by SHUTTLE_REPLAY_FILE (a "failing schedule" printed by a failure).
+#[cfg(feature = "shuttle")]
+pub fn run_shuttle_test(path: std::path::PathBuf, f: fn(&Path)) {
+    let iterations = std::env::var("SHUTTLE_ITERATIONS")
+        .ok()
+        .and_then(|x| x.parse().ok())
+        .unwrap_or(10);
+
+    let mut config = shuttle::Config::default();
+    config.max_steps = shuttle::MaxSteps::FailAfter(10_000_000);
+    config.stack_size = 1024 * 1024;
+
+    let test = move || {
+        // Images small enough to be decoded as a single group never spawn
+        // worker threads, and the PCT scheduler treats a test without any
+        // concurrency as an error. Spawn a trivial thread (with a yield, so
+        // that the scheduler sees at least one point with two runnable
+        // tasks) to mask that.
+        let t = thread::spawn(|| {});
+        thread::yield_now();
+        t.join().unwrap();
+        f(&path);
+    };
+
+    match std::env::var("SHUTTLE_SCHEDULER").as_deref() {
+        Ok("replay") => {
+            let schedule =
+                std::fs::read_to_string(std::env::var("SHUTTLE_REPLAY_FILE").unwrap()).unwrap();
+            shuttle::replay(test, schedule.trim());
+        }
+        Ok("pct") => {
+            let depth = std::env::var("SHUTTLE_PCT_DEPTH")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(3);
+            let scheduler = shuttle::scheduler::PctScheduler::new(depth, iterations);
+            shuttle::Runner::new(scheduler, config).run(test);
+        }
+        _ => {
+            let scheduler = shuttle::scheduler::RandomScheduler::new(iterations);
+            shuttle::Runner::new(scheduler, config).run(test);
+        }
     }
 }

@@ -3,10 +3,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-macro_rules! declare_test_file {
-    ($ident:ident, $path:expr) => {
-        declare_test_file!($ident, $path, checkpoints: &[]);
-    };
+macro_rules! declare_test_file_common {
     ($ident:ident, $path:expr, checkpoints: $checkpoints:expr) => {
         paste::paste! {
             #[test]
@@ -69,6 +66,48 @@ macro_rules! declare_test_file {
                 crate::tests::compare_parallel::run_progressive(&path);
             }
         }
+    };
+}
+
+macro_rules! declare_test_file_shuttle {
+    ($ident:ident, $path:expr) => {
+        paste::paste! {
+            #[cfg(all(feature = "shuttle", not(any(target_family = "wasm", target_arch = "wasm32"))))]
+            #[test]
+            fn [<test_compare_parallel_oneshot_shuttle_ $ident>]() {
+                let path = std::path::Path::new("resources/test/").join($path);
+                crate::tests::compare_parallel::run_shuttle_test(
+                    path,
+                    crate::tests::compare_parallel::run_oneshot,
+                );
+            }
+
+            #[cfg(all(feature = "shuttle", not(any(target_family = "wasm", target_arch = "wasm32"))))]
+            #[test]
+            fn [<test_compare_parallel_progressive_shuttle_ $ident>]() {
+                let path = std::path::Path::new("resources/test/").join($path);
+                crate::tests::compare_parallel::run_shuttle_test(
+                    path,
+                    crate::tests::compare_parallel::run_progressive,
+                );
+            }
+        }
+    };
+}
+
+macro_rules! declare_test_file {
+    ($ident:ident, $path:expr) => {
+        declare_test_file!($ident, $path, checkpoints: &[]);
+    };
+    ($ident:ident, $path:expr, checkpoints: $checkpoints:expr) => {
+        declare_test_file_common!($ident, $path, checkpoints: $checkpoints);
+        declare_test_file_shuttle!($ident, $path);
+    };
+    ($ident:ident, $path:expr, skip_shuttle) => {
+        declare_test_file!($ident, $path, checkpoints: &[], skip_shuttle);
+    };
+    ($ident:ident, $path:expr, checkpoints: $checkpoints:expr, skip_shuttle) => {
+        declare_test_file_common!($ident, $path, checkpoints: $checkpoints);
     };
 }
 

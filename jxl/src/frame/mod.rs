@@ -3,7 +3,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-use std::{collections::HashSet, sync::Arc};
+use crate::util::sync::Arc;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::{
     api::{JxlDecoderOptions, JxlParallelRunner},
@@ -29,7 +30,7 @@ use quant_weights::DequantMatrices;
 use quantizer::{LfQuantFactors, QuantizerParams};
 
 use crate::features::epf::SigmaSource;
-use crate::util::AtomicRefCell;
+use crate::util::sync::{Mutex, RwLock};
 
 mod adaptive_lf_smoothing;
 mod block_context_map;
@@ -71,7 +72,7 @@ pub struct HfGlobalState {
     num_histograms: u32,
     passes: Vec<PassState>,
     dequant_matrices: DequantMatrices,
-    hf_coefficients: Vec<AtomicRefCell<Vec<i32>>>,
+    hf_coefficients: Vec<Mutex<Vec<i32>>>,
 }
 
 #[derive(Debug)]
@@ -240,8 +241,8 @@ pub enum DataStatus {
 #[derive(Debug)]
 struct GroupStatus {
     // Groups that should be rendered on the next call to flush().
-    need_vardct_flush: HashSet<usize>,
-    need_modular_flush: HashSet<usize>,
+    need_vardct_flush: BTreeSet<usize>,
+    need_modular_flush: BTreeSet<usize>,
     channel_status: Vec<Vec<DataStatus>>,
     final_vardct_render_done: HashSet<usize>,
     incomplete_groups: usize,
@@ -254,8 +255,8 @@ impl GroupStatus {
         // We don't track noise channels because we pretend they always
         // have the same status as VarDCT channels.
         GroupStatus {
-            need_vardct_flush: HashSet::new(),
-            need_modular_flush: HashSet::new(),
+            need_vardct_flush: BTreeSet::new(),
+            need_modular_flush: BTreeSet::new(),
             channel_status: vec![vec![DataStatus::Zero; 3 + ecs]; count],
             final_vardct_render_done: HashSet::new(),
             incomplete_groups: count,
@@ -299,15 +300,15 @@ pub struct Frame {
     /// Reusable buffers for VarDCT group decoding.
     vardct_buffers: PerThreadStorage<group::VarDctBuffers>,
     group_status: GroupStatus,
-    patches: Arc<AtomicRefCell<PatchesDictionary>>,
-    splines: Arc<AtomicRefCell<Splines>>,
-    noise: Arc<AtomicRefCell<Noise>>,
-    lf_quant: Arc<AtomicRefCell<LfQuantFactors>>,
-    color_correlation_params: Arc<AtomicRefCell<ColorCorrelationParams>>,
-    epf_sigma: Arc<AtomicRefCell<SigmaSource>>,
+    patches: Arc<RwLock<PatchesDictionary>>,
+    splines: Arc<RwLock<Splines>>,
+    noise: Arc<RwLock<Noise>>,
+    lf_quant: Arc<RwLock<LfQuantFactors>>,
+    color_correlation_params: Arc<RwLock<ColorCorrelationParams>>,
+    epf_sigma: Arc<RwLock<SigmaSource>>,
     // LF groups that received data and thus should trigger a modular
     // re-render of the corresponding groups.
-    dirty_lf_groups: HashSet<usize>,
+    dirty_lf_groups: BTreeSet<usize>,
 }
 
 impl Frame {

@@ -406,6 +406,7 @@ declare_test_file!(
         (10332, 0.0004338)
     ]
 );
+declare_test_file!(issue865_large_toc, "issue865_large_toc.jxl");
 declare_test_file!(large_header, "large_header.jxl");
 declare_test_file!(lossy_with_icc, "lossy_with_icc.jxl");
 declare_test_file!(
@@ -473,7 +474,8 @@ declare_test_file!(
         (704790, 0.0004241),
         (827667, 0.0001988),
         (1203801, 0.0000516)
-    ]
+    ],
+    skip_shuttle
 );
 declare_test_file!(tree_max_property_20, "tree_max_property_20.jxl");
 declare_test_file!(upsampled_alpha, "upsampled_alpha.jxl");
