@@ -855,7 +855,7 @@ fn smooth_2d_unsqueeze_simd_impl<D: SimdDescriptor>(
     init_buffers(buffer, ibuf, in_xs + 2 * lanes + 8);
 
     // Precompute 5x5 flattened kernels for 2D 2x unsqueezing from DEFAULT_KERN_2
-    let k2d = compute_5x5_kernels_2x(&crate::headers::DEFAULT_KERN_2);
+    let k2d = compute_5x5_kernels_2x(&crate::headers::transform_data::DEFAULT_KERN_2);
     let mut kernel_vecs = [[D::F32Vec::splat(d, 0.0); 25]; 4];
     for idx in 0..4 {
         for i in 0..25 {
@@ -993,7 +993,7 @@ fn smooth_h_unsqueeze_simd_impl<D: SimdDescriptor>(
     init_buffers(buffer, ibuf, in_xs + 2 * lanes + 8);
 
     // Precompute 1D horizontal 2x kernels by vertical averaging of 2D 2x kernels
-    let k2d = compute_5x5_kernels_2x(&crate::headers::DEFAULT_KERN_2);
+    let k2d = compute_5x5_kernels_2x(&crate::headers::transform_data::DEFAULT_KERN_2);
     let kh = compute_1d_h_kernels_2x(&k2d);
     let mut kernel_vecs = [[D::F32Vec::splat(d, 0.0); 25]; 2];
     for idx in 0..2 {
@@ -1108,7 +1108,7 @@ fn smooth_v_unsqueeze_simd_impl<D: SimdDescriptor>(
     init_buffers(buffer, ibuf, in_xs + 2 * lanes + 8);
 
     // Precompute 1D vertical 2x kernels by horizontal averaging of 2D 2x kernels
-    let k2d = compute_5x5_kernels_2x(&crate::headers::DEFAULT_KERN_2);
+    let k2d = compute_5x5_kernels_2x(&crate::headers::transform_data::DEFAULT_KERN_2);
     let kv = compute_1d_v_kernels_2x(&k2d);
     let mut kernel_vecs = [[D::F32Vec::splat(d, 0.0); 25]; 2];
     for idx in 0..2 {
