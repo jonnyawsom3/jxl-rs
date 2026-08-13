@@ -70,6 +70,55 @@ fn foreach_ready_rect(
     Ok(())
 }
 
+fn ready_image_area(
+    group_rect: Rect,
+    group_position: (usize, usize),
+    group_count: (usize, usize),
+    input_size: (usize, usize),
+    border_size: (usize, usize),
+    xrange: Range<u8>,
+    yrange: Range<u8>,
+) -> Option<Rect> {
+    let (gx, gy) = group_position;
+    let y0 = match (gy == 0, yrange.start) {
+        (true, 0) => group_rect.origin.1,
+        (false, 0) => group_rect.origin.1 - border_size.1,
+        (_, 1) => group_rect.origin.1 + border_size.1,
+        // (_, 2)
+        _ => group_rect.end().1 - border_size.1,
+    };
+    let x0 = match (gx == 0, xrange.start) {
+        (true, 0) => group_rect.origin.0,
+        (false, 0) => group_rect.origin.0 - border_size.0,
+        (_, 1) => group_rect.origin.0 + border_size.0,
+        // (_, 2)
+        _ => group_rect.end().0 - border_size.0,
+    };
+
+    let y1 = match (gy + 1 == group_count.1, yrange.end) {
+        (true, 3) => group_rect.end().1,
+        (false, 3) => group_rect.end().1 + border_size.1,
+        (_, 2) => group_rect.end().1 - border_size.1,
+        // (_, 1)
+        _ => group_rect.origin.1 + border_size.1,
+    }
+    .min(input_size.1);
+
+    let x1 = match (gx + 1 == group_count.0, xrange.end) {
+        (true, 3) => group_rect.end().0,
+        (false, 3) => group_rect.end().0 + border_size.0,
+        (_, 2) => group_rect.end().0 - border_size.0,
+        // (_, 1)
+        _ => group_rect.origin.0 + border_size.0,
+    }
+    .min(input_size.0);
+
+    (x1 >= x0 && y1 >= y0).then_some(Rect {
+        origin: (x0, y0),
+        size: (x1 - x0, y1 - y0),
+    })
+}
+
 impl LowMemoryRenderPipeline {
     pub(super) fn maybe_get_scratch_buffer(
         &self,
@@ -77,12 +126,13 @@ impl LowMemoryRenderPipeline {
         kind: usize,
     ) -> Option<OwnedRawImage> {
         self.scratch_channel_buffers
-            .try_borrow_mut()
+            .try_lock()
+            .ok()
             .and_then(|mut x| x[channel * 3 + kind].pop())
     }
 
     fn store_scratch_buffer(&self, channel: usize, kind: usize, image: OwnedRawImage) {
-        let Some(mut buf) = self.scratch_channel_buffers.try_borrow_mut() else {
+        let Some(mut buf) = self.scratch_channel_buffers.try_lock().ok() else {
             return;
         };
         if kind == 0
@@ -126,7 +176,12 @@ impl LowMemoryRenderPipeline {
                 continue;
             }
             let (bx, by) = self.border_size;
-            let (sx, sy) = buf.data[c].borrow().as_ref().unwrap().byte_size();
+            let (sx, sy) = buf.data[c]
+                .try_read()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .byte_size();
             let ChannelInfo {
                 ty,
                 downsample: (dx, dy),
@@ -134,7 +189,7 @@ impl LowMemoryRenderPipeline {
             let ty = ty.unwrap();
             let bx = bx >> dx;
             let by = by >> dy;
-            let mut topbottom = if let Some(b) = buf.topbottom[c].borrow_mut().take() {
+            let mut topbottom = if let Some(b) = buf.topbottom[c].try_write().unwrap().take() {
                 b
             } else if let Some(b) = self.maybe_get_scratch_buffer(c, 1) {
                 b
@@ -143,7 +198,7 @@ impl LowMemoryRenderPipeline {
                 let width = (1 << self.shared.log_group_size) * ty.size();
                 OwnedRawImage::new_zeroed_with_padding((width, height), (0, 0), (0, 0))?
             };
-            let mut leftright = if let Some(b) = buf.leftright[c].borrow_mut().take() {
+            let mut leftright = if let Some(b) = buf.leftright[c].try_write().unwrap().take() {
                 b
             } else if let Some(b) = self.maybe_get_scratch_buffer(c, 2) {
                 b
@@ -152,7 +207,7 @@ impl LowMemoryRenderPipeline {
                 let width = 4 * bx * ty.size();
                 OwnedRawImage::new_zeroed_with_padding((width, height), (0, 0), (0, 0))?
             };
-            let data = &buf.data[c].borrow();
+            let data = buf.data[c].try_read().unwrap();
             let input = data.as_ref().unwrap();
             if by != 0 {
                 for y in 0..(2 * by).min(sy) {
@@ -169,8 +224,8 @@ impl LowMemoryRenderPipeline {
                     row_out[4 * bx * ty.size() - cs..].copy_from_slice(&row_in[sx - cs..]);
                 }
             }
-            *buf.leftright[c].borrow_mut() = Some(leftright);
-            *buf.topbottom[c].borrow_mut() = Some(topbottom);
+            *buf.leftright[c].try_write().unwrap() = Some(leftright);
+            *buf.topbottom[c].try_write().unwrap() = Some(topbottom);
         }
 
         let ready_mask = self.input_buffers.mark_ready(g);
@@ -179,48 +234,16 @@ impl LowMemoryRenderPipeline {
         data.ensure_populated(self)?;
 
         foreach_ready_rect(ready_mask, |xrange, yrange| {
-            let y0 = match (gy == 0, yrange.start) {
-                (true, 0) => group_rect.origin.1,
-                (false, 0) => group_rect.origin.1 - self.border_size.1,
-                (_, 1) => group_rect.origin.1 + self.border_size.1,
-                // (_, 2)
-                _ => group_rect.end().1 - self.border_size.1,
-            };
-            let x0 = match (gx == 0, xrange.start) {
-                (true, 0) => group_rect.origin.0,
-                (false, 0) => group_rect.origin.0 - self.border_size.0,
-                (_, 1) => group_rect.origin.0 + self.border_size.0,
-                // (_, 2)
-                _ => group_rect.end().0 - self.border_size.0,
-            };
-
-            let y1 = match (gy + 1 == self.shared.group_count.1, yrange.end) {
-                (true, 3) => group_rect.end().1,
-                (false, 3) => {
-                    (group_rect.end().1 + self.border_size.1).min(self.shared.input_size.1)
-                }
-                (_, 2) => group_rect.end().1 - self.border_size.1,
-                // (_, 1)
-                _ => group_rect.origin.1 + self.border_size.1,
-            };
-
-            let x1 = match (gx + 1 == self.shared.group_count.0, xrange.end) {
-                (true, 3) => group_rect.end().0,
-                (false, 3) => {
-                    (group_rect.end().0 + self.border_size.0).min(self.shared.input_size.0)
-                }
-                (_, 2) => group_rect.end().0 - self.border_size.0,
-                // (_, 1)
-                _ => group_rect.origin.0 + self.border_size.0,
-            };
-
-            if x1 < x0 || y1 < y0 {
+            let Some(image_area) = ready_image_area(
+                group_rect,
+                (gx, gy),
+                self.shared.group_count,
+                self.shared.input_size,
+                self.border_size,
+                xrange,
+                yrange,
+            ) else {
                 return Ok(());
-            }
-
-            let image_area = Rect {
-                origin: (x0, y0),
-                size: (x1 - x0, y1 - y0),
             };
 
             let mut local_buffers = buffer_splitter.get_local_buffers(
@@ -294,5 +317,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_ready_image_area_clips_tiny_edge_group() {
+        let area = ready_image_area(
+            Rect {
+                origin: (512, 512),
+                size: (8, 8),
+            },
+            (1, 1),
+            (2, 2),
+            (520, 520),
+            (18, 18),
+            0..1,
+            0..1,
+        );
+        assert_eq!(
+            area,
+            Some(Rect {
+                origin: (494, 494),
+                size: (26, 26),
+            })
+        );
     }
 }

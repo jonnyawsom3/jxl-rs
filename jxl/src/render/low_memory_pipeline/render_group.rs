@@ -3,6 +3,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+use crate::util::sync::{RwLock, RwLockReadGuard};
 use std::ops::Range;
 
 use crate::{
@@ -15,7 +16,7 @@ use crate::{
             LowMemoryRenderPipelinePerThread, helpers::get_distinct_indices, run_stage::ExtraInfo,
         },
     },
-    util::{AtomicRef, AtomicRefCell, ChannelVec, ShiftRightCeil, mirror, tracing_wrappers::*},
+    util::{ChannelVec, ShiftRightCeil, mirror, tracing_wrappers::*},
 };
 
 use super::{LowMemoryRenderPipeline, row_buffers::RowBuffer};
@@ -71,7 +72,7 @@ struct BufferFiller<'a> {
     group_ysize: usize,
     top_y_offset: usize,
     bot_y_offset: usize,
-    images: [Option<AtomicRef<'a, OwnedRawImage>>; 9],
+    images: [Option<RwLockReadGuard<'a, Option<OwnedRawImage>>>; 9],
     copy_byte_offset_initial: usize,
     src_byte_offset_left_topbottom: usize,
     src_byte_offset_left_center: usize,
@@ -147,7 +148,8 @@ impl<'a> BufferFiller<'a> {
 
         let gw = rp.shared.group_count.0;
 
-        let mut images: [Option<AtomicRef<OwnedRawImage>>; 9] = std::array::from_fn(|_| None);
+        let mut images: [Option<RwLockReadGuard<'_, Option<OwnedRawImage>>>; 9] =
+            std::array::from_fn(|_| None);
 
         let has_left = copy_x0 < group_x0;
         let has_right = copy_x1 > group_x1;
@@ -162,9 +164,9 @@ impl<'a> BufferFiller<'a> {
         let src_byte_offset_left_center = 4 * (bx >> dx) * ty.size() - to_copy_left;
 
         fn make_ref(
-            g: &AtomicRefCell<Option<OwnedRawImage>>,
-        ) -> Option<AtomicRef<'_, OwnedRawImage>> {
-            Some(AtomicRef::map(g.borrow(), |x| x.as_ref().unwrap()))
+            g: &RwLock<Option<OwnedRawImage>>,
+        ) -> Option<RwLockReadGuard<'_, Option<OwnedRawImage>>> {
+            Some(g.try_read().unwrap())
         }
 
         if has_top {
@@ -254,7 +256,8 @@ impl<'a> BufferFiller<'a> {
         let output_row = data.row_buffers[0][self.c].get_row_mut::<u8>(y);
         let mut copy_byte_offset = self.copy_byte_offset_initial;
 
-        if let Some(left_buf) = &self.images[base] {
+        if let Some(left_buf_guard) = &self.images[base] {
+            let left_buf = left_buf_guard.as_ref().unwrap();
             let input_row = left_buf.row(input_y);
             let src_byte_offset = if row_idx != 1 {
                 self.src_byte_offset_left_topbottom
@@ -266,13 +269,14 @@ impl<'a> BufferFiller<'a> {
             copy_byte_offset += self.to_copy_left;
         }
 
-        let center_buf = self.images[base + 1].as_ref().unwrap();
+        let center_buf = self.images[base + 1].as_ref().unwrap().as_ref().unwrap();
         let input_row = center_buf.row(input_y);
         output_row[copy_byte_offset..copy_byte_offset + self.to_copy_main]
             .copy_from_slice(&input_row[self.copy_start..self.copy_end]);
         copy_byte_offset += self.to_copy_main;
 
-        if let Some(right_buf) = &self.images[base + 2] {
+        if let Some(right_buf_guard) = &self.images[base + 2] {
+            let right_buf = right_buf_guard.as_ref().unwrap();
             let input_row = right_buf.row(input_y);
             output_row[copy_byte_offset..copy_byte_offset + self.to_copy_right]
                 .copy_from_slice(&input_row[..self.to_copy_right]);
@@ -313,7 +317,18 @@ impl LowMemoryRenderPipeline {
         // to an actual row of the current processing stage; actual processing happens
         // when vy % (1<<vshift) == 0.
 
-        let vy0 = y0.saturating_sub(num_extra_rows);
+        // Rects are not guaranteed to start at a vertical position that is aligned
+        // to the rows of subsampled channels/stages. Since border rows are computed
+        // with floor semantics (see the parity adjustments in the loop below), the
+        // first border row of a subsampled channel can start up to (1 << dy) - 1
+        // virtual rows before y0 - scaled_y_border; extend the virtual row range
+        // upwards so that it is still produced.
+        let max_dy = (0..num_channels)
+            .map(|c| self.shared.channel_info[0][c].downsample.1 as usize)
+            .chain(self.downsampling_for_stage.iter().map(|d| d.1))
+            .max()
+            .unwrap_or(0);
+        let vy0 = y0.saturating_sub(num_extra_rows + (1 << max_dy) - 1);
         let vy1 = image_area.end().1 + num_extra_rows;
 
         let fillers: ChannelVec<_> = (0..num_channels)
@@ -336,10 +351,14 @@ impl LowMemoryRenderPipeline {
                 if stage_vy % (1 << dy) != 0 {
                     continue;
                 }
-                if stage_vy - (y0 as isize) < -(scaled_y_border as isize) {
+                let y = stage_vy >> dy;
+                // The first needed row is computed with *floor* semantics (matching the
+                // x direction and BufferFiller::new): if y0 - scaled_y_border is not
+                // aligned to the channel's vertical subsampling, the subsampled row
+                // containing it must still be filled, as downstream stages will read it.
+                if y < (y0 as isize - scaled_y_border as isize) >> dy {
                     continue;
                 }
-                let y = stage_vy >> dy;
                 // Do not produce rows in out-of-bounds areas.
                 if y < 0 || y >= self.shared.input_size.1.shrc(dy) as isize {
                     continue;
@@ -358,10 +377,18 @@ impl LowMemoryRenderPipeline {
                 if stage_vy % (1 << dy) != 0 {
                     continue;
                 }
-                if stage_vy - (y0 as isize) < -(scaled_y_border as isize) {
+                let y = stage_vy >> dy;
+                if matches!(stage, Stage::Save(_)) {
+                    // Save stages write to shared output buffers, so they must only
+                    // process rows owned by this rect; keep ceil semantics for them.
+                    if stage_vy - (y0 as isize) < -(scaled_y_border as isize) {
+                        continue;
+                    }
+                } else if y < (y0 as isize - scaled_y_border as isize) >> dy {
+                    // As for input channels, border rows of vertically subsampled
+                    // stages are computed with floor semantics.
                     continue;
                 }
-                let y = stage_vy >> dy;
                 let shifted_ysize = self.shared.input_size.1.shrc(dy);
                 // Do not produce rows in out-of-bounds areas.
                 if y < 0 || y >= shifted_ysize as isize {
@@ -421,7 +448,7 @@ impl LowMemoryRenderPipeline {
                         let borderx = s.border().0 as usize;
                         let bordery = s.border().1 as isize;
                         // Apply x padding.
-                        if (gx == 0 || image_area.origin.0 == 0) && borderx != 0 {
+                        if start_of_row && borderx != 0 {
                             for (si, ci) in self.stage_input_buffer_index[i].iter() {
                                 for iy in -bordery..=bordery {
                                     let y = mirror(y as isize + iy, shifted_ysize);
@@ -436,10 +463,7 @@ impl LowMemoryRenderPipeline {
                                 }
                             }
                         }
-                        if (gx + 1 == self.shared.group_count.0
-                            || image_area.end().0 == self.shared.input_size.0)
-                            && borderx != 0
-                        {
+                        if end_of_row && borderx != 0 {
                             for (si, ci) in self.stage_input_buffer_index[i].iter() {
                                 for iy in -bordery..=bordery {
                                     let y = mirror(y as isize + iy, shifted_ysize);
