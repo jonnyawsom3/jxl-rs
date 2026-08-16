@@ -398,6 +398,7 @@ pub fn decode_vardct_group(
 
     let block_group_rect = frame_header.block_group_rect(group);
     debug!(?block_group_rect);
+    let log_group_dim = frame_header.log_group_dim();
     let mut pass_info = passes
         .iter_mut()
         .map(|(pass, br)| PassInfo::new(hf_global, frame_header, block_group_rect, *pass, br))
@@ -483,10 +484,16 @@ pub fn decode_vardct_group(
             };
 
             let lf_rects = {
+                // Subsampled LF image is at the top-left corner of each LF group.
+                let lfgx = block_group_rect.origin.0 >> log_group_dim;
+                let lfgy = block_group_rect.origin.1 >> log_group_dim;
+                let lfbx = lfgx << log_group_dim;
+                let lfby = lfgy << log_group_dim;
+
                 let lf_area: [Rect; 3] = core::array::from_fn(|i| Rect {
                     origin: (
-                        (block_group_rect.origin.0 + bx) >> hshift[i],
-                        (block_group_rect.origin.1 + by) >> vshift[i],
+                        lfbx + ((block_group_rect.origin.0 - lfbx + bx) >> hshift[i]),
+                        lfby + ((block_group_rect.origin.1 - lfby + by) >> vshift[i]),
                     ),
                     size: (cx, cy),
                 });
@@ -615,4 +622,49 @@ pub fn decode_vardct_group(
             .check_final_state(&hf_global.passes[*pass].histograms, br)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use test_log::test;
+
+    use crate::error::Result;
+    use crate::image::Rect;
+    use crate::tests::decode::decode;
+
+    #[test]
+    fn subsampled_chroma() -> Result<()> {
+        let (_, mut frames) = decode(include_bytes!("../../resources/test/multiple_lf_420.jxl"))?;
+        let frame = frames.pop().unwrap();
+        let [image]: [_; 1] = frame.try_into().unwrap();
+
+        let rect_lfs = [
+            // Green rect
+            Rect {
+                origin: (2048 * 3, 0),
+                size: (16 * 3, 16),
+            },
+            // Red rect
+            Rect {
+                origin: (0, 2048),
+                size: (16 * 3, 16),
+            },
+        ];
+        for rect in rect_lfs {
+            let view = image.get_rect(rect);
+            for y in 0..view.size().1 {
+                let row = view.row(y);
+                for pixel in row.chunks(3) {
+                    let &[r, g, b] = pixel else {
+                        unreachable!();
+                    };
+                    let max = r.max(g).max(b);
+                    let min = r.min(g).min(b);
+                    assert!(max - min > 0.5);
+                }
+            }
+        }
+
+        Ok(())
+    }
 }

@@ -329,8 +329,20 @@ impl Frame {
             }
         }
 
+        let largest_group_area = self.header.group_dim().min(self.header.size().0)
+            * self.header.group_dim().min(self.header.size().1);
+
+        const THREAD_COUNT_DENOMINATOR: usize = 16;
+
+        let mut groups_of_work = 0;
+
         if self.header.encoding == Encoding::VarDCT {
             for (group, _) in groups.iter() {
+                let sz = self.header.group_rect(*group).size;
+                let area = sz.0 * sz.1;
+                if area >= largest_group_area {
+                    groups_of_work += THREAD_COUNT_DENOMINATOR;
+                }
                 if self.group_status.channel_status[*group][0] == DataStatus::Final {
                     pipeline_mut!(self, p, p.mark_group_to_rerender(*group));
                 }
@@ -340,6 +352,13 @@ impl Frame {
         // STEP 3: Make sure modular_global is ready to run, and prepare the list of
         // all the decoding/rendering steps that we want to run.
         modular_global.prepare_render(&self.header, |g, c, is_final| {
+            let sz = self.header.group_rect(g).size;
+            let area = sz.0 * sz.1;
+            if area >= largest_group_area {
+                groups_of_work += THREAD_COUNT_DENOMINATOR / 2;
+            } else if area * 2 >= largest_group_area {
+                groups_of_work += THREAD_COUNT_DENOMINATOR / 4;
+            }
             self.group_status.update_status(
                 g,
                 c,
@@ -367,6 +386,14 @@ impl Frame {
             };
 
         let ready_steps = modular_global.take_ready_steps();
+
+        for g in extra_groups_to_vardct_render.iter() {
+            let sz = self.header.group_rect(*g).size;
+            let area = sz.0 * sz.1;
+            if area >= largest_group_area {
+                groups_of_work += THREAD_COUNT_DENOMINATOR / 2;
+            }
+        }
 
         const TRANSFORM_STEPS_PER_TASK: usize = 3;
 
@@ -436,10 +463,8 @@ impl Frame {
             Ok(())
         };
 
-        // Avoid significantly more than one thread per full group
-        let max_threads = (self.header.size().0 / self.header.group_dim())
-            * (self.header.size().1 / self.header.group_dim())
-            + 1;
+        // Avoid significantly more than one thread per largest-group worth of work.
+        let max_threads = groups_of_work.div_ceil(THREAD_COUNT_DENOMINATOR).max(1);
 
         let hw_threads = std::thread::available_parallelism()
             .map(|x| x.get())
