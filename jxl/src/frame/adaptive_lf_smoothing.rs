@@ -34,114 +34,151 @@ fn chroma_upsample_lf(
     if upsample_h {
         for g in 0..num_lf_groups {
             let mut r = frame_header.lf_group_rect(g);
+
+            // When doing both directions, the horizontal pass only operates
+            // on the rows that actually contain vertically subsampled data.
             if upsample_v {
                 r.size.1 = r.size.1.div_ceil(2);
             }
-            let r_right = if r.origin.0 + group_dim < xsize {
-                Some(Rect {
-                    origin: (r.origin.0 + group_dim, r.origin.1),
-                    size: (1, r.size.1),
-                })
-            } else {
-                None
-            };
-            let r_left = if r.origin.0 > (group_dim >> 1) {
-                Some(Rect {
-                    origin: (r.origin.0 - (group_dim >> 1) - 1, r.origin.1),
-                    size: (1, r.size.1),
-                })
-            } else {
-                None
-            };
+
             let sw = r.size.0.div_ceil(2);
 
             let view = lf_image.get_rect(r);
-            let view_r = r_right.map(|r| lf_image.get_rect(r));
-            let view_l = r_left.map(|r| lf_image.get_rect(r));
+
+            // The source samples are in subsampled coordinates.  The sample
+            // immediately before this group is therefore one subsampled
+            // sample before the first sample belonging to this group.
+            let view_l = if r.origin.0 >= (group_dim >> 1) {
+                Some(lf_image.get_rect(Rect {
+                    origin: (
+                        r.origin.0 - (group_dim >> 1),
+                        r.origin.1,
+                    ),
+                    size: (1, r.size.1),
+                }))
+            } else {
+                None
+            };
+
+            // Likewise, the first sample of the next LF group is the
+            // right-hand interpolation neighbour.
+            let view_r = if r.origin.0 + group_dim < xsize {
+                Some(lf_image.get_rect(Rect {
+                    origin: (r.origin.0 + group_dim, r.origin.1),
+                    size: (1, r.size.1),
+                }))
+            } else {
+                None
+            };
+
             let mut out = upsampled.get_rect_mut(r);
 
             for y in 0..r.size.1 {
                 let row = view.row(y);
                 let row_out = out.row(y);
-                let rightmost_sample = view_r.map(|v| v.row(y)[0]).unwrap_or(row[sw - 1]);
-                let leftmost_sample = view_l.map(|v| v.row(y)[0]).unwrap_or(row[0]);
+
+                let leftmost_sample = view_l
+                    .map(|v| v.row(y)[0])
+                    .unwrap_or(row[0]);
+
+                let rightmost_sample = view_r
+                    .map(|v| v.row(y)[0])
+                    .unwrap_or(row[sw - 1]);
 
                 for sx in 0..sw {
                     let x = sx << 1;
+
                     let a = if sx == 0 {
                         leftmost_sample
                     } else {
                         row[sx - 1]
                     };
+
                     let b = row[sx];
-                    let c = if sx == sw - 1 {
+
+                    let c = if sx + 1 == sw {
                         rightmost_sample
                     } else {
                         row[sx + 1]
                     };
 
                     row_out[x] = 0.25 * a + 0.75 * b;
-                    if let Some(out) = row_out.get_mut(x + 1) {
-                        *out = 0.75 * b + 0.25 * c;
+
+                    if x + 1 < r.size.0 {
+                        row_out[x + 1] = 0.75 * b + 0.25 * c;
                     }
                 }
             }
         }
+
         std::mem::swap(lf_image, &mut upsampled);
     }
 
     if upsample_v {
         for g in 0..num_lf_groups {
             let r = frame_header.lf_group_rect(g);
-            let r_bottom = if r.origin.1 + group_dim < ysize {
-                Some(Rect {
-                    origin: (r.origin.0, r.origin.1 + group_dim),
-                    size: (r.size.0, 1),
-                })
-            } else {
-                None
-            };
-            let r_top = if r.origin.1 > (group_dim >> 1) {
-                Some(Rect {
-                    origin: (r.origin.0, r.origin.1 - (group_dim >> 1) - 1),
-                    size: (r.size.0, 1),
-                })
-            } else {
-                None
-            };
             let sh = r.size.1.div_ceil(2);
 
             let view = lf_image.get_rect(r);
-            let view_b = r_bottom.map(|r| lf_image.get_rect(r));
-            let view_t = r_top.map(|r| lf_image.get_rect(r));
+
+            // Same correction as horizontal upsampling: these are
+            // neighbouring samples in subsampled coordinates.
+            let view_t = if r.origin.1 >= (group_dim >> 1) {
+                Some(lf_image.get_rect(Rect {
+                    origin: (
+                        r.origin.0,
+                        r.origin.1 - (group_dim >> 1),
+                    ),
+                    size: (r.size.0, 1),
+                }))
+            } else {
+                None
+            };
+
+            let view_b = if r.origin.1 + group_dim < ysize {
+                Some(lf_image.get_rect(Rect {
+                    origin: (r.origin.0, r.origin.1 + group_dim),
+                    size: (r.size.0, 1),
+                }))
+            } else {
+                None
+            };
+
             let mut out = upsampled.get_rect_mut(r);
 
             for sy in 0..sh {
                 let y = sy << 1;
+
                 let row_b = view.row(sy);
+
                 let row_a = if sy == 0 {
                     view_t.map(|v| v.row(0)).unwrap_or(row_b)
                 } else {
                     view.row(sy - 1)
                 };
-                let row_c = if sy == sh - 1 {
+
+                let row_c = if sy + 1 == sh {
                     view_b.map(|v| v.row(0)).unwrap_or(row_b)
                 } else {
                     view.row(sy + 1)
                 };
 
                 let row_out = out.row(y);
+
                 for x in 0..r.size.0 {
                     row_out[x] = 0.25 * row_a[x] + 0.75 * row_b[x];
                 }
-                if out.size().1 > y + 1 {
+
+                if y + 1 < r.size.1 {
                     let row_out_b = out.row(y + 1);
+
                     for x in 0..r.size.0 {
                         row_out_b[x] = 0.75 * row_b[x] + 0.25 * row_c[x];
                     }
                 }
             }
         }
+
         std::mem::swap(lf_image, &mut upsampled);
     }
 
@@ -194,6 +231,9 @@ pub fn adaptive_lf_smoothing(
             shifts[ch].1 != 0,
         )?;
     }
+
+    // All channels are now at full LF resolution.
+    let shifts = [(0u8, 0u8); 3];
 
     let mut smoothed0 = Image::<f32>::new((xsize, ysize))?;
     let mut smoothed1 = Image::<f32>::new((xsize, ysize))?;
