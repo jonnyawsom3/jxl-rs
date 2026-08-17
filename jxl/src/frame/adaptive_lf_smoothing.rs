@@ -6,7 +6,7 @@
 use crate::api::JxlParallelRunner;
 use crate::error::Result;
 use crate::headers::frame_header::FrameHeader;
-use crate::image::{Image, Rect};
+use crate::image::Image;
 use crate::render::buffer_splitter::OutputChannelSplitter;
 use num_traits::abs;
 
@@ -15,167 +15,6 @@ const W_SIDE: f32 = 0.20345139757231578;
 #[allow(clippy::excessive_precision)]
 const W_CORNER: f32 = 0.0334829185968739;
 const W_CENTER: f32 = 1.0 - 4.0 * (W_SIDE + W_CORNER);
-
-fn chroma_upsample_lf(
-    frame_header: &FrameHeader,
-    lf_image: &mut Image<f32>,
-    upsample_h: bool,
-    upsample_v: bool,
-) -> Result<()> {
-    if !upsample_h && !upsample_v {
-        return Ok(());
-    }
-
-    let (xsize, ysize) = lf_image.size();
-    let group_dim = frame_header.group_dim();
-    let num_lf_groups = frame_header.num_lf_groups();
-
-    let mut upsampled = Image::<f32>::new((xsize, ysize))?;
-
-    if upsample_h {
-        for g in 0..num_lf_groups {
-            let mut r = frame_header.lf_group_rect(g);
-
-            if upsample_v {
-                r.size.1 = r.size.1.div_ceil(2);
-            }
-
-            let r_right = if r.origin.0 + group_dim < xsize {
-                Some(Rect {
-                    origin: (r.origin.0 + group_dim, r.origin.1),
-                    size: (1, r.size.1),
-                })
-            } else {
-                None
-            };
-
-            let r_left = if r.origin.0 > (group_dim >> 1) {
-                Some(Rect {
-                    origin: (
-                        r.origin.0 - (group_dim >> 1) - 1,
-                        r.origin.1,
-                    ),
-                    size: (1, r.size.1),
-                })
-            } else {
-                None
-            };
-
-            let sw = r.size.0.div_ceil(2);
-
-            let view = lf_image.get_rect(r);
-            let view_r = r_right.map(|r| lf_image.get_rect(r));
-            let view_l = r_left.map(|r| lf_image.get_rect(r));
-            let mut out = upsampled.get_rect_mut(r);
-
-            for y in 0..r.size.1 {
-                let row = view.row(y);
-                let row_out = out.row(y);
-
-                let rightmost_sample =
-                    view_r.map(|v| v.row(y)[0]).unwrap_or(row[sw - 1]);
-                let leftmost_sample =
-                    view_l.map(|v| v.row(y)[0]).unwrap_or(row[0]);
-
-                for sx in 0..sw {
-                    let x = sx << 1;
-
-                    let a = if sx == 0 {
-                        leftmost_sample
-                    } else {
-                        row[sx - 1]
-                    };
-
-                    let b = row[sx];
-
-                    let c = if sx == sw - 1 {
-                        rightmost_sample
-                    } else {
-                        row[sx + 1]
-                    };
-
-                    row_out[x] = 0.25 * a + 0.75 * b;
-
-                    if let Some(out) = row_out.get_mut(x + 1) {
-                        *out = 0.75 * b + 0.25 * c;
-                    }
-                }
-            }
-        }
-
-        std::mem::swap(lf_image, &mut upsampled);
-    }
-
-    if upsample_v {
-        for g in 0..num_lf_groups {
-            let r = frame_header.lf_group_rect(g);
-
-            let r_bottom = if r.origin.1 + group_dim < ysize {
-                Some(Rect {
-                    origin: (r.origin.0, r.origin.1 + group_dim),
-                    size: (r.size.0, 1),
-                })
-            } else {
-                None
-            };
-
-            let r_top = if r.origin.1 > (group_dim >> 1) {
-                Some(Rect {
-                    origin: (
-                        r.origin.0,
-                        r.origin.1 - (group_dim >> 1) - 1,
-                    ),
-                    size: (r.size.0, 1),
-                })
-            } else {
-                None
-            };
-
-            let sh = r.size.1.div_ceil(2);
-
-            let view = lf_image.get_rect(r);
-            let view_b = r_bottom.map(|r| lf_image.get_rect(r));
-            let view_t = r_top.map(|r| lf_image.get_rect(r));
-            let mut out = upsampled.get_rect_mut(r);
-
-            for sy in 0..sh {
-                let y = sy << 1;
-
-                let row_b = view.row(sy);
-
-                let row_a = if sy == 0 {
-                    view_t.map(|v| v.row(0)).unwrap_or(row_b)
-                } else {
-                    view.row(sy - 1)
-                };
-
-                let row_c = if sy == sh - 1 {
-                    view_b.map(|v| v.row(0)).unwrap_or(row_b)
-                } else {
-                    view.row(sy + 1)
-                };
-
-                let row_out = out.row(y);
-
-                for x in 0..r.size.0 {
-                    row_out[x] = 0.25 * row_a[x] + 0.75 * row_b[x];
-                }
-
-                if out.size().1 > y + 1 {
-                    let row_out_b = out.row(y + 1);
-
-                    for x in 0..r.size.0 {
-                        row_out_b[x] = 0.75 * row_b[x] + 0.25 * row_c[x];
-                    }
-                }
-            }
-        }
-
-        std::mem::swap(lf_image, &mut upsampled);
-    }
-
-    Ok(())
-}
 
 fn compute_pixel_channel(
     dc_factor: f32,
@@ -194,12 +33,164 @@ fn compute_pixel_channel(
     let bl = row_bottom[x - 1];
     let bc = row_bottom[x];
     let br = row_bottom[x + 1];
-
     let corner = tl + tr + bl + br;
     let side = ml + mr + tc + bc;
     let sm = corner * W_CORNER + side * W_SIDE + mc * W_CENTER;
-
     (mc, sm, gap.max(abs((mc - sm) / dc_factor)))
+}
+
+/// Upsample one dimension by a factor of two.
+///
+/// The interpolation matches the chroma LF interpolation used by the
+/// original implementation:
+///
+///   dst[2*x]     = 1/4 * left + 3/4 * center
+///   dst[2*x + 1] = 3/4 * center + 1/4 * right
+///
+/// At the image boundaries the nearest available sample is replicated.
+///
+/// Performing this one factor-of-two stage repeatedly means this also works
+/// if a future caller supplies a shift greater than one, without changing
+/// the interpolation kernel.
+fn upsample_h2(src: &Image<f32>, dst_width: usize) -> Result<Image<f32>> {
+    let (src_width, height) = src.size();
+
+    if src_width >= dst_width {
+        return Ok(src.clone());
+    }
+
+    let mut dst = Image::<f32>::new((dst_width, height))?;
+
+    for y in 0..height {
+        let src_row = src.row(y);
+        let dst_row = dst.row_mut(y);
+
+        for sx in 0..src_width {
+            let x = sx << 1;
+
+            if x >= dst_width {
+                break;
+            }
+
+            let left = if sx == 0 {
+                src_row[sx]
+            } else {
+                src_row[sx - 1]
+            };
+
+            let center = src_row[sx];
+
+            let right = if sx + 1 < src_width {
+                src_row[sx + 1]
+            } else {
+                center
+            };
+
+            dst_row[x] = 0.25 * left + 0.75 * center;
+
+            if x + 1 < dst_width {
+                dst_row[x + 1] = 0.75 * center + 0.25 * right;
+            }
+        }
+    }
+
+    Ok(dst)
+}
+
+fn upsample_v2(src: &Image<f32>, dst_height: usize) -> Result<Image<f32>> {
+    let (width, src_height) = src.size();
+
+    if src_height >= dst_height {
+        return Ok(src.clone());
+    }
+
+    let mut dst = Image::<f32>::new((width, dst_height))?;
+
+    for sy in 0..src_height {
+        let y = sy << 1;
+
+        if y >= dst_height {
+            break;
+        }
+
+        let row_center = src.row(sy);
+
+        let row_top = if sy == 0 {
+            row_center
+        } else {
+            src.row(sy - 1)
+        };
+
+        let row_bottom = if sy + 1 < src_height {
+            src.row(sy + 1)
+        } else {
+            row_center
+        };
+
+        {
+            let row_out = dst.row_mut(y);
+
+            for x in 0..width {
+                row_out[x] = 0.25 * row_top[x] + 0.75 * row_center[x];
+            }
+        }
+
+        if y + 1 < dst_height {
+            let row_out = dst.row_mut(y + 1);
+
+            for x in 0..width {
+                row_out[x] = 0.75 * row_center[x] + 0.25 * row_bottom[x];
+            }
+        }
+    }
+
+    Ok(dst)
+}
+
+fn chroma_upsample_lf(
+    lf_image: &mut Image<f32>,
+    target_size: (usize, usize),
+    hshift: u8,
+    vshift: u8,
+) -> Result<()> {
+    let (target_width, target_height) = target_size;
+
+    if hshift == 0 && vshift == 0 {
+        debug_assert_eq!(lf_image.size(), target_size);
+        return Ok(());
+    }
+
+    let mut current = std::mem::replace(
+        lf_image,
+        Image::<f32>::new(lf_image.size())?,
+    );
+
+    // Upsample horizontally one factor-of-two stage at a time. Doing this
+    // globally, rather than per LF group, is important: the neighbour used
+    // by the interpolation must be the neighbour in the decoded image,
+    // including when it lies in another LF group.
+    for _ in 0..hshift {
+        if current.size().0 >= target_width {
+            break;
+        }
+
+        current = upsample_h2(&current, target_width)?;
+    }
+
+    // Then do the same vertically. The two operations are separable, so
+    // their order does not affect the resulting full-resolution grid.
+    for _ in 0..vshift {
+        if current.size().1 >= target_height {
+            break;
+        }
+
+        current = upsample_v2(&current, target_height)?;
+    }
+
+    debug_assert_eq!(current.size(), target_size);
+
+    *lf_image = current;
+    Ok(())
 }
 
 // TODO(veluca): consider SIMDfying this.
@@ -215,23 +206,24 @@ pub fn adaptive_lf_smoothing(
         return Ok(());
     }
 
-    // These shifts describe the input chroma sampling. They are only needed
-    // to determine which channels need to be upsampled. After
-    // chroma_upsample_lf(), all channels are on the full-resolution LF grid.
-    let shifts: [_; 3] =
-        std::array::from_fn(|i| {
-            (
-                frame_header.hshift(i) as u8,
-                frame_header.vshift(i) as u8,
-            )
-        });
+    let shifts: [(u8, u8); 3] = std::array::from_fn(|i| {
+        (
+            frame_header.hshift(i) as u8,
+            frame_header.vshift(i) as u8,
+        )
+    });
 
+    // Adaptive LF smoothing works on a common full-resolution LF grid.
+    // Chroma channels are decoded at their native subsampled resolution,
+    // so bring them to that grid before smoothing.
     for ch in 0..3 {
+        let (hshift, vshift) = shifts[ch];
+
         chroma_upsample_lf(
-            frame_header,
             &mut lf_image[ch],
-            shifts[ch].0 != 0,
-            shifts[ch].1 != 0,
+            (xsize, ysize),
+            hshift,
+            vshift,
         )?;
     }
 
@@ -247,14 +239,12 @@ pub fn adaptive_lf_smoothing(
 
     parallel_runner.run(num_lf_groups, &|g| {
         let r = frame_header.lf_group_rect(g);
-
         let mut out_ref_0 = splitter0.borrow_typed_rect::<f32>(r);
         let mut out_ref_1 = splitter1.borrow_typed_rect::<f32>(r);
         let mut out_ref_2 = splitter2.borrow_typed_rect::<f32>(r);
 
         for ly in 0..r.size.1 {
             let gy = r.origin.1 + ly;
-
             let row_0 = out_ref_0.typed_row_mut::<f32>(ly);
             let row_1 = out_ref_1.typed_row_mut::<f32>(ly);
             let row_2 = out_ref_2.typed_row_mut::<f32>(ly);
