@@ -29,14 +29,24 @@ fn chroma_upsample_lf(
     let (xsize, ysize) = lf_image.size();
     let group_dim = frame_header.group_dim();
     let num_lf_groups = frame_header.num_lf_groups();
+
     let mut upsampled = Image::<f32>::new((xsize, ysize))?;
+
+    /*
+     * The LF chroma samples are stored subsampled inside the LF-group
+     * rectangle.  Upsampling must therefore be performed with respect to
+     * the LF-group boundaries, while using the neighbouring chroma sample
+     * from the adjacent LF group.
+     *
+     * Do not derive the neighbouring position from the output pixel
+     * coordinate.  The source and destination have different sampling
+     * grids.
+     */
 
     if upsample_h {
         for g in 0..num_lf_groups {
             let mut r = frame_header.lf_group_rect(g);
 
-            // When doing both directions, the horizontal pass only operates
-            // on the rows that actually contain vertically subsampled data.
             if upsample_v {
                 r.size.1 = r.size.1.div_ceil(2);
             }
@@ -45,13 +55,19 @@ fn chroma_upsample_lf(
 
             let view = lf_image.get_rect(r);
 
-            // The source samples are in subsampled coordinates.  The sample
-            // immediately before this group is therefore one subsampled
-            // sample before the first sample belonging to this group.
-            let view_l = if r.origin.0 >= (group_dim >> 1) {
+            /*
+             * The chroma LF-group starts group_dim / 2 samples before the
+             * corresponding full-resolution group boundary.  The extra
+             * -1 selects the chroma sample immediately preceding the group.
+             *
+             * This is intentionally asymmetric with the right side: the
+             * right neighbour is the first chroma sample belonging to the
+             * next LF group.
+             */
+            let view_l = if r.origin.0 > (group_dim >> 1) {
                 Some(lf_image.get_rect(Rect {
                     origin: (
-                        r.origin.0 - (group_dim >> 1),
+                        r.origin.0 - (group_dim >> 1) - 1,
                         r.origin.1,
                     ),
                     size: (1, r.size.1),
@@ -60,8 +76,6 @@ fn chroma_upsample_lf(
                 None
             };
 
-            // Likewise, the first sample of the next LF group is the
-            // right-hand interpolation neighbour.
             let view_r = if r.origin.0 + group_dim < xsize {
                 Some(lf_image.get_rect(Rect {
                     origin: (r.origin.0 + group_dim, r.origin.1),
@@ -102,6 +116,17 @@ fn chroma_upsample_lf(
                         row[sx + 1]
                     };
 
+                    /*
+                     * Linear 2x reconstruction:
+                     *
+                     *   a ---- b ---- c
+                     *        ↓ ↓
+                     *      .75 .25
+                     *
+                     * The reconstructed sample immediately before b is
+                     * 0.25*a + 0.75*b, and the one immediately after b is
+                     * 0.75*b + 0.25*c.
+                     */
                     row_out[x] = 0.25 * a + 0.75 * b;
 
                     if x + 1 < r.size.0 {
@@ -121,13 +146,11 @@ fn chroma_upsample_lf(
 
             let view = lf_image.get_rect(r);
 
-            // Same correction as horizontal upsampling: these are
-            // neighbouring samples in subsampled coordinates.
-            let view_t = if r.origin.1 >= (group_dim >> 1) {
+            let view_t = if r.origin.1 > (group_dim >> 1) {
                 Some(lf_image.get_rect(Rect {
                     origin: (
                         r.origin.0,
-                        r.origin.1 - (group_dim >> 1),
+                        r.origin.1 - (group_dim >> 1) - 1,
                     ),
                     size: (r.size.0, 1),
                 }))
@@ -202,9 +225,11 @@ fn compute_pixel_channel(
     let bl = row_bottom[x - 1];
     let bc = row_bottom[x];
     let br = row_bottom[x + 1];
+
     let corner = tl + tr + bl + br;
     let side = ml + mr + tc + bc;
     let sm = corner * W_CORNER + side * W_SIDE + mc * W_CENTER;
+
     (mc, sm, gap.max(abs((mc - sm) / dc_factor)))
 }
 
@@ -216,23 +241,39 @@ pub fn adaptive_lf_smoothing(
     parallel_runner: &mut dyn JxlParallelRunner,
 ) -> Result<()> {
     let (xsize, ysize) = lf_image[0].size();
+
     if ysize <= 2 || xsize <= 2 {
         return Ok(());
     }
 
-    let shifts: [_; 3] =
-        std::array::from_fn(|i| (frame_header.hshift(i) as u8, frame_header.vshift(i) as u8));
+    let original_shifts: [_; 3] = std::array::from_fn(|i| {
+        (
+            frame_header.hshift(i) as u8,
+            frame_header.vshift(i) as u8,
+        )
+    });
 
+    /*
+     * F.2 operates on a common-resolution LF image.  The chroma channels
+     * therefore have to be reconstructed before the smoothing pass.
+     */
     for ch in 0..3 {
         chroma_upsample_lf(
             frame_header,
             &mut lf_image[ch],
-            shifts[ch].0 != 0,
-            shifts[ch].1 != 0,
+            original_shifts[ch].0 != 0,
+            original_shifts[ch].1 != 0,
         )?;
     }
 
-    // All channels are now at full LF resolution.
+    /*
+     * chroma_upsample_lf() has converted every channel that was
+     * subsampled to the same full-resolution LF grid as luma.
+     *
+     * From this point on, do NOT apply the original chroma shifts when
+     * addressing the images. Doing so would throw away the reconstructed
+     * odd samples and recreates the visible block boundaries.
+     */
     let shifts = [(0u8, 0u8); 3];
 
     let mut smoothed0 = Image::<f32>::new((xsize, ysize))?;
@@ -247,48 +288,76 @@ pub fn adaptive_lf_smoothing(
 
     parallel_runner.run(num_lf_groups, &|g| {
         let r = frame_header.lf_group_rect(g);
+
         let mut out_ref_0 = splitter0.borrow_typed_rect::<f32>(r);
         let mut out_ref_1 = splitter1.borrow_typed_rect::<f32>(r);
         let mut out_ref_2 = splitter2.borrow_typed_rect::<f32>(r);
 
         for ly in 0..r.size.1 {
             let gy = r.origin.1 + ly;
+
             let sly = shifts.map(|(_, vshift)| ly >> vshift);
+
             let mut row_0 =
-                (sly[0] << shifts[0].1 == ly).then(|| out_ref_0.typed_row_mut::<f32>(sly[0]));
+                (sly[0] << shifts[0].1 == ly)
+                    .then(|| out_ref_0.typed_row_mut::<f32>(sly[0]));
+
             let mut row_1 =
-                (sly[1] << shifts[1].1 == ly).then(|| out_ref_1.typed_row_mut::<f32>(sly[1]));
+                (sly[1] << shifts[1].1 == ly)
+                    .then(|| out_ref_1.typed_row_mut::<f32>(sly[1]));
+
             let mut row_2 =
-                (sly[2] << shifts[2].1 == ly).then(|| out_ref_2.typed_row_mut::<f32>(sly[2]));
+                (sly[2] << shifts[2].1 == ly)
+                    .then(|| out_ref_2.typed_row_mut::<f32>(sly[2]));
 
             for lx in 0..r.size.0 {
                 let gx = r.origin.0 + lx;
+
                 let slx = shifts.map(|(hshift, _)| lx >> hshift);
 
-                if gy == 0 || gy == ysize - 1 || gx == 0 || gx == xsize - 1 {
+                if gy == 0
+                    || gy == ysize - 1
+                    || gx == 0
+                    || gx == xsize - 1
+                {
                     if let Some(row_0) = &mut row_0 {
                         row_0[slx[0]] = lf_image[0].row(gy)[gx];
                     }
+
                     if let Some(row_1) = &mut row_1 {
                         row_1[slx[1]] = lf_image[1].row(gy)[gx];
                     }
+
                     if let Some(row_2) = &mut row_2 {
                         row_2[slx[2]] = lf_image[2].row(gy)[gx];
                     }
+
                     continue;
                 }
 
                 let mut row_0 = row_0
                     .as_mut()
-                    .and_then(|r| (slx[0] << shifts[0].0 == lx).then_some(&mut **r));
+                    .and_then(|r| {
+                        (slx[0] << shifts[0].0 == lx)
+                            .then_some(&mut **r)
+                    });
+
                 let mut row_1 = row_1
                     .as_mut()
-                    .and_then(|r| (slx[1] << shifts[1].0 == lx).then_some(&mut **r));
+                    .and_then(|r| {
+                        (slx[1] << shifts[1].0 == lx)
+                            .then_some(&mut **r)
+                    });
+
                 let mut row_2 = row_2
                     .as_mut()
-                    .and_then(|r| (slx[2] << shifts[2].0 == lx).then_some(&mut **r));
+                    .and_then(|r| {
+                        (slx[2] << shifts[2].0 == lx)
+                            .then_some(&mut **r)
+                    });
 
                 let gap = 0.5;
+
                 let (mc_x, sm_x, gap) = compute_pixel_channel(
                     lf_factors[0],
                     gap,
@@ -297,6 +366,7 @@ pub fn adaptive_lf_smoothing(
                     lf_image[0].row(gy),
                     lf_image[0].row(gy + 1),
                 );
+
                 let (mc_y, sm_y, gap) = compute_pixel_channel(
                     lf_factors[1],
                     gap,
@@ -305,6 +375,7 @@ pub fn adaptive_lf_smoothing(
                     lf_image[1].row(gy),
                     lf_image[1].row(gy + 1),
                 );
+
                 let (mc_b, sm_b, gap) = compute_pixel_channel(
                     lf_factors[2],
                     gap,
@@ -313,24 +384,34 @@ pub fn adaptive_lf_smoothing(
                     lf_image[2].row(gy),
                     lf_image[2].row(gy + 1),
                 );
+
                 let factor = (3.0 - 4.0 * gap).max(0.0);
+
                 if let Some(row_0) = &mut row_0 {
-                    row_0[slx[0]] = (sm_x - mc_x) * factor + mc_x;
+                    row_0[slx[0]] =
+                        (sm_x - mc_x) * factor + mc_x;
                 }
+
                 if let Some(row_1) = &mut row_1 {
-                    row_1[slx[1]] = (sm_y - mc_y) * factor + mc_y;
+                    row_1[slx[1]] =
+                        (sm_y - mc_y) * factor + mc_y;
                 }
+
                 if let Some(row_2) = &mut row_2 {
-                    row_2[slx[2]] = (sm_b - mc_b) * factor + mc_b;
+                    row_2[slx[2]] =
+                        (sm_b - mc_b) * factor + mc_b;
                 }
             }
         }
+
         Ok(())
     })?;
 
     drop(splitter0);
     drop(splitter1);
     drop(splitter2);
+
     *lf_image = [smoothed0, smoothed1, smoothed2];
+
     Ok(())
 }
