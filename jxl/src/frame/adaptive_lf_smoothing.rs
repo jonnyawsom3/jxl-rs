@@ -41,24 +41,14 @@ fn compute_pixel_channel(
 
 /// Upsample one dimension by a factor of two.
 ///
-/// The interpolation matches the chroma LF interpolation used by the
-/// original implementation:
+/// The interpolation is:
 ///
 ///   dst[2*x]     = 1/4 * left + 3/4 * center
 ///   dst[2*x + 1] = 3/4 * center + 1/4 * right
 ///
-/// At the image boundaries the nearest available sample is replicated.
-///
-/// Performing this one factor-of-two stage repeatedly means this also works
-/// if a future caller supplies a shift greater than one, without changing
-/// the interpolation kernel.
+/// The nearest available sample is replicated at the image boundary.
 fn upsample_h2(src: &Image<f32>, dst_width: usize) -> Result<Image<f32>> {
     let (src_width, height) = src.size();
-
-    if src_width >= dst_width {
-        return Ok(src.clone());
-    }
-
     let mut dst = Image::<f32>::new((dst_width, height))?;
 
     for y in 0..height {
@@ -99,11 +89,6 @@ fn upsample_h2(src: &Image<f32>, dst_width: usize) -> Result<Image<f32>> {
 
 fn upsample_v2(src: &Image<f32>, dst_height: usize) -> Result<Image<f32>> {
     let (width, src_height) = src.size();
-
-    if src_height >= dst_height {
-        return Ok(src.clone());
-    }
-
     let mut dst = Image::<f32>::new((width, dst_height))?;
 
     for sy in 0..src_height {
@@ -153,43 +138,36 @@ fn chroma_upsample_lf(
     hshift: u8,
     vshift: u8,
 ) -> Result<()> {
+    debug_assert!(hshift != 0 || vshift != 0);
+
+    let source_size = lf_image.size();
+    let mut current =
+        std::mem::replace(lf_image, Image::<f32>::new(source_size)?);
+
     let (target_width, target_height) = target_size;
 
-    if hshift == 0 && vshift == 0 {
-        debug_assert_eq!(lf_image.size(), target_size);
-        return Ok(());
-    }
-
-    let mut current = std::mem::replace(
-        lf_image,
-        Image::<f32>::new(lf_image.size())?,
-    );
-
-    // Upsample horizontally one factor-of-two stage at a time. Doing this
-    // globally, rather than per LF group, is important: the neighbour used
-    // by the interpolation must be the neighbour in the decoded image,
-    // including when it lies in another LF group.
+    // Upsample horizontally one factor-of-two stage at a time.
+    //
+    // This is deliberately performed over the complete image rather than
+    // independently for each LF group. The neighbour required by the
+    // interpolation may belong to an adjacent LF group.
     for _ in 0..hshift {
-        if current.size().0 >= target_width {
-            break;
+        if current.size().0 < target_width {
+            current = upsample_h2(&current, target_width)?;
         }
-
-        current = upsample_h2(&current, target_width)?;
     }
 
-    // Then do the same vertically. The two operations are separable, so
-    // their order does not affect the resulting full-resolution grid.
+    // Upsample vertically one factor-of-two stage at a time.
     for _ in 0..vshift {
-        if current.size().1 >= target_height {
-            break;
+        if current.size().1 < target_height {
+            current = upsample_v2(&current, target_height)?;
         }
-
-        current = upsample_v2(&current, target_height)?;
     }
 
     debug_assert_eq!(current.size(), target_size);
 
     *lf_image = current;
+
     Ok(())
 }
 
@@ -213,18 +191,20 @@ pub fn adaptive_lf_smoothing(
         )
     });
 
-    // Adaptive LF smoothing works on a common full-resolution LF grid.
-    // Chroma channels are decoded at their native subsampled resolution,
-    // so bring them to that grid before smoothing.
+    // Adaptive LF smoothing operates on the common full-resolution LF grid.
+    // Chroma LF planes are decoded at their native subsampled resolution,
+    // so upsample them before entering the smoothing pass.
     for ch in 0..3 {
         let (hshift, vshift) = shifts[ch];
 
-        chroma_upsample_lf(
-            &mut lf_image[ch],
-            (xsize, ysize),
-            hshift,
-            vshift,
-        )?;
+        if hshift != 0 || vshift != 0 {
+            chroma_upsample_lf(
+                &mut lf_image[ch],
+                (xsize, ysize),
+                hshift,
+                vshift,
+            )?;
+        }
     }
 
     let mut smoothed0 = Image::<f32>::new((xsize, ysize))?;
