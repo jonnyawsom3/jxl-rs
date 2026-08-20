@@ -7,13 +7,10 @@ use jxl_simd::{
     F32SimdVec, I32SimdVec, SimdDescriptor, SimdMask, U32SimdVec, shl, shr, simd_function,
 };
 
-use crate::{
-    error::{Error, Result},
-    frame::modular::{ChannelInfo, IMAGE_OFFSET, ModularChannel},
-    headers::modular::SqueezeParams,
-    image::{Image, ImageRect},
-};
-
+use crate::error::{Error, Result};
+use crate::frame::modular::{ChannelInfo, IMAGE_OFFSET, ModularChannel};
+use crate::headers::modular::SqueezeParams;
+use crate::image::{Image, ImageRect};
 use crate::util::tracing_wrappers::*;
 
 #[instrument(level = "trace", err)]
@@ -675,44 +672,47 @@ pub fn do_vsqueeze_step(
     vsqueeze(in_avg, in_res, in_next_avg, out_prev, out);
 }
 
-use super::super::{ModularBufferInfo, ModularGridKind};
-use crate::headers::frame_header::FrameHeader;
+use super::step::TiledChannelView;
 use crate::image::Rect;
 
+#[allow(clippy::excessive_precision)]
 #[inline(always)]
 fn convolve_2d_simd<D: SimdDescriptor>(
     d: D,
     n: &[D::F32Vec; 25],
 ) -> (D::I32Vec, D::I32Vec, D::I32Vec, D::I32Vec) {
-    let w_7 = D::F32Vec::splat(d, 7.0 / 65536.0);
-    let w_93 = D::F32Vec::splat(d, 93.0 / 65536.0);
-    let w_1188 = D::F32Vec::splat(d, 1188.0 / 65536.0);
-    let w_2842 = D::F32Vec::splat(d, 2842.0 / 65536.0);
-    let w_6175 = D::F32Vec::splat(d, 6175.0 / 65536.0);
-    let w_12905 = D::F32Vec::splat(d, 12905.0 / 65536.0);
-    let w_25198 = D::F32Vec::splat(d, 25198.0 / 65536.0);
+    let w_2 = D::F32Vec::splat(d, 0.62646443);
+    let w_10 = D::F32Vec::splat(d, 0.24413736);
+    let w_18 = D::F32Vec::splat(d, 0.06118795);
+    let w_26 = D::F32Vec::splat(d, -0.01328634);
+    let w_34 = D::F32Vec::splat(d, -0.03355509);
+    let w_50 = D::F32Vec::splat(d, -0.02015225);
+    let w_58 = D::F32Vec::splat(d, -0.01033307);
+    let w_74 = D::F32Vec::splat(d, -0.00056067);
 
     let mut sum_0_0_a = D::F32Vec::zero(d);
     let mut sum_0_0_b = D::F32Vec::zero(d);
     let mut sum_0_0_c = D::F32Vec::zero(d);
     let mut sum_0_0_d = D::F32Vec::zero(d);
 
-    sum_0_0_a = n[1].mul_add(w_7, sum_0_0_a);
-    sum_0_0_a = n[2].mul_add(w_93, sum_0_0_a);
-    sum_0_0_a = n[5].mul_add(w_7, sum_0_0_a);
-    sum_0_0_a = n[6].mul_add(w_6175, sum_0_0_a);
+    sum_0_0_a = n[1].mul_add(w_58, sum_0_0_a);
+    sum_0_0_a = n[2].mul_add(w_50, sum_0_0_a);
+    sum_0_0_a = n[3].mul_add(w_74, sum_0_0_a);
+    sum_0_0_a = n[5].mul_add(w_58, sum_0_0_a);
 
-    sum_0_0_b = n[7].mul_add(w_12905, sum_0_0_b);
-    sum_0_0_b = n[8].mul_add(w_1188, sum_0_0_b);
-    sum_0_0_b = n[10].mul_add(w_93, sum_0_0_b);
+    sum_0_0_b = n[6].mul_add(w_18, sum_0_0_b);
+    sum_0_0_b = n[7].mul_add(w_10, sum_0_0_b);
+    sum_0_0_b = n[8].mul_add(w_34, sum_0_0_b);
+    sum_0_0_b = n[10].mul_add(w_50, sum_0_0_b);
 
-    sum_0_0_c = n[11].mul_add(w_12905, sum_0_0_c);
-    sum_0_0_c = n[12].mul_add(w_25198, sum_0_0_c);
-    sum_0_0_c = n[13].mul_add(w_2842, sum_0_0_c);
+    sum_0_0_c = n[11].mul_add(w_10, sum_0_0_c);
+    sum_0_0_c = n[12].mul_add(w_2, sum_0_0_c);
+    sum_0_0_c = n[13].mul_add(w_26, sum_0_0_c);
 
-    sum_0_0_d = n[16].mul_add(w_1188, sum_0_0_d);
-    sum_0_0_d = n[17].mul_add(w_2842, sum_0_0_d);
-    sum_0_0_d = n[18].mul_add(w_93, sum_0_0_d);
+    sum_0_0_d = n[15].mul_add(w_74, sum_0_0_d);
+    sum_0_0_d = n[16].mul_add(w_34, sum_0_0_d);
+    sum_0_0_d = n[17].mul_add(w_26, sum_0_0_d);
+    sum_0_0_d = n[18].mul_add(w_50, sum_0_0_d);
 
     let sum_0_0 = (sum_0_0_a + sum_0_0_b) + (sum_0_0_c + sum_0_0_d);
 
@@ -721,22 +721,24 @@ fn convolve_2d_simd<D: SimdDescriptor>(
     let mut sum_0_1_c = D::F32Vec::zero(d);
     let mut sum_0_1_d = D::F32Vec::zero(d);
 
-    sum_0_1_a = n[2].mul_add(w_93, sum_0_1_a);
-    sum_0_1_a = n[3].mul_add(w_7, sum_0_1_a);
-    sum_0_1_a = n[6].mul_add(w_1188, sum_0_1_a);
-    sum_0_1_a = n[7].mul_add(w_12905, sum_0_1_a);
+    sum_0_1_a = n[1].mul_add(w_74, sum_0_1_a);
+    sum_0_1_a = n[2].mul_add(w_50, sum_0_1_a);
+    sum_0_1_a = n[3].mul_add(w_58, sum_0_1_a);
+    sum_0_1_a = n[6].mul_add(w_34, sum_0_1_a);
 
-    sum_0_1_b = n[8].mul_add(w_6175, sum_0_1_b);
-    sum_0_1_b = n[9].mul_add(w_7, sum_0_1_b);
-    sum_0_1_b = n[11].mul_add(w_2842, sum_0_1_b);
+    sum_0_1_b = n[7].mul_add(w_10, sum_0_1_b);
+    sum_0_1_b = n[8].mul_add(w_18, sum_0_1_b);
+    sum_0_1_b = n[9].mul_add(w_58, sum_0_1_b);
+    sum_0_1_b = n[11].mul_add(w_26, sum_0_1_b);
 
-    sum_0_1_c = n[12].mul_add(w_25198, sum_0_1_c);
-    sum_0_1_c = n[13].mul_add(w_12905, sum_0_1_c);
-    sum_0_1_c = n[14].mul_add(w_93, sum_0_1_c);
+    sum_0_1_c = n[12].mul_add(w_2, sum_0_1_c);
+    sum_0_1_c = n[13].mul_add(w_10, sum_0_1_c);
+    sum_0_1_c = n[14].mul_add(w_50, sum_0_1_c);
 
-    sum_0_1_d = n[16].mul_add(w_93, sum_0_1_d);
-    sum_0_1_d = n[17].mul_add(w_2842, sum_0_1_d);
-    sum_0_1_d = n[18].mul_add(w_1188, sum_0_1_d);
+    sum_0_1_d = n[16].mul_add(w_50, sum_0_1_d);
+    sum_0_1_d = n[17].mul_add(w_26, sum_0_1_d);
+    sum_0_1_d = n[18].mul_add(w_34, sum_0_1_d);
+    sum_0_1_d = n[19].mul_add(w_74, sum_0_1_d);
 
     let sum_0_1 = (sum_0_1_a + sum_0_1_b) + (sum_0_1_c + sum_0_1_d);
 
@@ -745,22 +747,24 @@ fn convolve_2d_simd<D: SimdDescriptor>(
     let mut sum_1_0_c = D::F32Vec::zero(d);
     let mut sum_1_0_d = D::F32Vec::zero(d);
 
-    sum_1_0_a = n[6].mul_add(w_1188, sum_1_0_a);
-    sum_1_0_a = n[7].mul_add(w_2842, sum_1_0_a);
-    sum_1_0_a = n[8].mul_add(w_93, sum_1_0_a);
-    sum_1_0_a = n[10].mul_add(w_93, sum_1_0_a);
+    sum_1_0_a = n[5].mul_add(w_74, sum_1_0_a);
+    sum_1_0_a = n[6].mul_add(w_34, sum_1_0_a);
+    sum_1_0_a = n[7].mul_add(w_26, sum_1_0_a);
+    sum_1_0_a = n[8].mul_add(w_50, sum_1_0_a);
 
-    sum_1_0_b = n[11].mul_add(w_12905, sum_1_0_b);
-    sum_1_0_b = n[12].mul_add(w_25198, sum_1_0_b);
-    sum_1_0_b = n[13].mul_add(w_2842, sum_1_0_b);
+    sum_1_0_b = n[10].mul_add(w_50, sum_1_0_b);
+    sum_1_0_b = n[11].mul_add(w_10, sum_1_0_b);
+    sum_1_0_b = n[12].mul_add(w_2, sum_1_0_b);
+    sum_1_0_b = n[13].mul_add(w_26, sum_1_0_b);
 
-    sum_1_0_c = n[15].mul_add(w_7, sum_1_0_c);
-    sum_1_0_c = n[16].mul_add(w_6175, sum_1_0_c);
-    sum_1_0_c = n[17].mul_add(w_12905, sum_1_0_c);
+    sum_1_0_c = n[15].mul_add(w_58, sum_1_0_c);
+    sum_1_0_c = n[16].mul_add(w_18, sum_1_0_c);
+    sum_1_0_c = n[17].mul_add(w_10, sum_1_0_c);
 
-    sum_1_0_d = n[18].mul_add(w_1188, sum_1_0_d);
-    sum_1_0_d = n[21].mul_add(w_7, sum_1_0_d);
-    sum_1_0_d = n[22].mul_add(w_93, sum_1_0_d);
+    sum_1_0_d = n[18].mul_add(w_34, sum_1_0_d);
+    sum_1_0_d = n[21].mul_add(w_58, sum_1_0_d);
+    sum_1_0_d = n[22].mul_add(w_50, sum_1_0_d);
+    sum_1_0_d = n[23].mul_add(w_74, sum_1_0_d);
 
     let sum_1_0 = (sum_1_0_a + sum_1_0_b) + (sum_1_0_c + sum_1_0_d);
 
@@ -769,22 +773,24 @@ fn convolve_2d_simd<D: SimdDescriptor>(
     let mut sum_1_1_c = D::F32Vec::zero(d);
     let mut sum_1_1_d = D::F32Vec::zero(d);
 
-    sum_1_1_a = n[6].mul_add(w_93, sum_1_1_a);
-    sum_1_1_a = n[7].mul_add(w_2842, sum_1_1_a);
-    sum_1_1_a = n[8].mul_add(w_1188, sum_1_1_a);
-    sum_1_1_a = n[11].mul_add(w_2842, sum_1_1_a);
+    sum_1_1_a = n[6].mul_add(w_50, sum_1_1_a);
+    sum_1_1_a = n[7].mul_add(w_26, sum_1_1_a);
+    sum_1_1_a = n[8].mul_add(w_34, sum_1_1_a);
+    sum_1_1_a = n[9].mul_add(w_74, sum_1_1_a);
 
-    sum_1_1_b = n[12].mul_add(w_25198, sum_1_1_b);
-    sum_1_1_b = n[13].mul_add(w_12905, sum_1_1_b);
-    sum_1_1_b = n[14].mul_add(w_93, sum_1_1_b);
+    sum_1_1_b = n[11].mul_add(w_26, sum_1_1_b);
+    sum_1_1_b = n[12].mul_add(w_2, sum_1_1_b);
+    sum_1_1_b = n[13].mul_add(w_10, sum_1_1_b);
+    sum_1_1_b = n[14].mul_add(w_50, sum_1_1_b);
 
-    sum_1_1_c = n[16].mul_add(w_1188, sum_1_1_c);
-    sum_1_1_c = n[17].mul_add(w_12905, sum_1_1_c);
-    sum_1_1_c = n[18].mul_add(w_6175, sum_1_1_c);
+    sum_1_1_c = n[16].mul_add(w_34, sum_1_1_c);
+    sum_1_1_c = n[17].mul_add(w_10, sum_1_1_c);
+    sum_1_1_c = n[18].mul_add(w_18, sum_1_1_c);
 
-    sum_1_1_d = n[19].mul_add(w_7, sum_1_1_d);
-    sum_1_1_d = n[22].mul_add(w_93, sum_1_1_d);
-    sum_1_1_d = n[23].mul_add(w_7, sum_1_1_d);
+    sum_1_1_d = n[19].mul_add(w_58, sum_1_1_d);
+    sum_1_1_d = n[21].mul_add(w_74, sum_1_1_d);
+    sum_1_1_d = n[22].mul_add(w_50, sum_1_1_d);
+    sum_1_1_d = n[23].mul_add(w_58, sum_1_1_d);
 
     let sum_1_1 = (sum_1_1_a + sum_1_1_b) + (sum_1_1_c + sum_1_1_d);
 
@@ -797,33 +803,42 @@ fn convolve_2d_simd<D: SimdDescriptor>(
     (out_0_0, out_0_1, out_1_0, out_1_1)
 }
 
+#[allow(clippy::excessive_precision)]
 #[inline(always)]
-fn convolve_1d_simd<D: SimdDescriptor>(d: D, n: &[D::F32Vec; 15]) -> (D::I32Vec, D::I32Vec) {
-    let w_116 = D::F32Vec::splat(d, 116.0 / 65536.0);
-    let w_474 = D::F32Vec::splat(d, 474.0 / 65536.0);
-    let w_3145 = D::F32Vec::splat(d, 3145.0 / 65536.0);
-    let w_6787 = D::F32Vec::splat(d, 6787.0 / 65536.0);
-    let w_14093 = D::F32Vec::splat(d, 14093.0 / 65536.0);
-    let w_27370 = D::F32Vec::splat(d, 27370.0 / 65536.0);
+fn convolve_1d_simd<D: SimdDescriptor>(d: D, n: &[D::F32Vec; 25]) -> (D::I32Vec, D::I32Vec) {
+    let w_1 = D::F32Vec::splat(d, 0.69472290);
+    let w_9 = D::F32Vec::splat(d, 0.27861324);
+    let w_17 = D::F32Vec::splat(d, 0.07666797);
+    let w_25 = D::F32Vec::splat(d, -0.00778371);
+    let w_41 = D::F32Vec::splat(d, -0.03143468);
+    let w_49 = D::F32Vec::splat(d, -0.02150597);
+    let w_65 = D::F32Vec::splat(d, -0.00434251);
+    let w_73 = D::F32Vec::splat(d, -0.00078780);
 
     let mut sum_even_a = D::F32Vec::zero(d);
     let mut sum_even_b = D::F32Vec::zero(d);
     let mut sum_even_c = D::F32Vec::zero(d);
     let mut sum_even_d = D::F32Vec::zero(d);
 
-    sum_even_a = n[1].mul_add(w_3145, sum_even_a);
-    sum_even_a = n[2].mul_add(w_6787, sum_even_a);
-    sum_even_a = n[3].mul_add(w_474, sum_even_a);
+    sum_even_a = n[1].mul_add(w_73, sum_even_a);
+    sum_even_a = n[2].mul_add(w_65, sum_even_a);
+    sum_even_a = n[5].mul_add(w_65, sum_even_a);
+    sum_even_a = n[6].mul_add(w_25, sum_even_a);
 
-    sum_even_b = n[5].mul_add(w_116, sum_even_b);
-    sum_even_b = n[6].mul_add(w_14093, sum_even_b);
+    sum_even_b = n[7].mul_add(w_17, sum_even_b);
+    sum_even_b = n[8].mul_add(w_41, sum_even_b);
+    sum_even_b = n[10].mul_add(w_49, sum_even_b);
+    sum_even_b = n[11].mul_add(w_9, sum_even_b);
 
-    sum_even_c = n[7].mul_add(w_27370, sum_even_c);
-    sum_even_c = n[8].mul_add(w_3145, sum_even_c);
+    sum_even_c = n[12].mul_add(w_1, sum_even_c);
+    sum_even_c = n[13].mul_add(w_25, sum_even_c);
+    sum_even_c = n[15].mul_add(w_65, sum_even_c);
+    sum_even_c = n[16].mul_add(w_25, sum_even_c);
 
-    sum_even_d = n[11].mul_add(w_3145, sum_even_d);
-    sum_even_d = n[12].mul_add(w_6787, sum_even_d);
-    sum_even_d = n[13].mul_add(w_474, sum_even_d);
+    sum_even_d = n[17].mul_add(w_17, sum_even_d);
+    sum_even_d = n[18].mul_add(w_41, sum_even_d);
+    sum_even_d = n[21].mul_add(w_73, sum_even_d);
+    sum_even_d = n[22].mul_add(w_65, sum_even_d);
 
     let sum_even = (sum_even_a + sum_even_b) + (sum_even_c + sum_even_d);
 
@@ -832,19 +847,25 @@ fn convolve_1d_simd<D: SimdDescriptor>(d: D, n: &[D::F32Vec; 15]) -> (D::I32Vec,
     let mut sum_odd_c = D::F32Vec::zero(d);
     let mut sum_odd_d = D::F32Vec::zero(d);
 
-    sum_odd_a = n[1].mul_add(w_474, sum_odd_a);
-    sum_odd_a = n[2].mul_add(w_6787, sum_odd_a);
-    sum_odd_a = n[3].mul_add(w_3145, sum_odd_a);
+    sum_odd_a = n[2].mul_add(w_65, sum_odd_a);
+    sum_odd_a = n[3].mul_add(w_73, sum_odd_a);
+    sum_odd_a = n[6].mul_add(w_41, sum_odd_a);
+    sum_odd_a = n[7].mul_add(w_17, sum_odd_a);
 
-    sum_odd_b = n[6].mul_add(w_3145, sum_odd_b);
-    sum_odd_b = n[7].mul_add(w_27370, sum_odd_b);
+    sum_odd_b = n[8].mul_add(w_25, sum_odd_b);
+    sum_odd_b = n[9].mul_add(w_65, sum_odd_b);
+    sum_odd_b = n[11].mul_add(w_25, sum_odd_b);
+    sum_odd_b = n[12].mul_add(w_1, sum_odd_b);
 
-    sum_odd_c = n[8].mul_add(w_14093, sum_odd_c);
-    sum_odd_c = n[9].mul_add(w_116, sum_odd_c);
+    sum_odd_c = n[13].mul_add(w_9, sum_odd_c);
+    sum_odd_c = n[14].mul_add(w_49, sum_odd_c);
+    sum_odd_c = n[16].mul_add(w_41, sum_odd_c);
+    sum_odd_c = n[17].mul_add(w_17, sum_odd_c);
 
-    sum_odd_d = n[11].mul_add(w_474, sum_odd_d);
-    sum_odd_d = n[12].mul_add(w_6787, sum_odd_d);
-    sum_odd_d = n[13].mul_add(w_3145, sum_odd_d);
+    sum_odd_d = n[18].mul_add(w_25, sum_odd_d);
+    sum_odd_d = n[19].mul_add(w_65, sum_odd_d);
+    sum_odd_d = n[22].mul_add(w_65, sum_odd_d);
+    sum_odd_d = n[23].mul_add(w_73, sum_odd_d);
 
     let sum_odd = (sum_odd_a + sum_odd_b) + (sum_odd_c + sum_odd_d);
 
@@ -862,140 +883,6 @@ fn init_buffers(buf: &mut [Vec<f32>; 5], ibuf: &mut Vec<i32>, len: usize) {
     ibuf.resize(len, 0);
 }
 
-fn load_row_to_scratch(
-    row_buf: &mut [i32],
-    input: &ModularBufferInfo,
-    frame_header: &FrameHeader,
-    yg: isize,
-    xoff: usize,
-    valid_len: usize,
-) {
-    let (w, h) = input.info.size;
-    // Only the first `valid_len` values are actual convolution inputs; the rest
-    // of the buffer only exists so that SIMD loads for the last output chunk
-    // stay in bounds, and their values do not affect the output. Restrict the
-    // buffer reads to the valid region: reading further could touch grid
-    // positions outside the 3x3 neighbourhood that the transform's
-    // dependencies guarantee to be safe to read, racing with their producers.
-    let max_len = row_buf.len().min(valid_len);
-    let clamped_y = if h == 1 {
-        0
-    } else if yg < 0 {
-        (-yg - 1) as usize
-    } else if yg as usize >= h {
-        2 * h - 1 - yg as usize
-    } else {
-        yg as usize
-    };
-
-    if input.grid_kind == ModularGridKind::None {
-        let grid_data = input.buffer_grid[0].data.try_read().unwrap();
-        let chan = grid_data.as_ref().unwrap();
-        let row = chan.data.row(clamped_y);
-
-        let left_clamp = (2 - xoff as isize).max(0) as usize;
-        let right_clamp_start = (w as isize + 2 - xoff as isize).min(max_len as isize) as usize;
-
-        if left_clamp < right_clamp_start {
-            let src_start = (xoff as isize + left_clamp as isize - 2) as usize;
-            let len = right_clamp_start - left_clamp;
-            row_buf[left_clamp..right_clamp_start]
-                .copy_from_slice(&row[src_start..src_start + len]);
-        }
-
-        if left_clamp > 0 {
-            row_buf[..left_clamp].fill(row[0]);
-        }
-
-        if right_clamp_start < max_len {
-            row_buf[right_clamp_start..max_len].fill(row[w - 1]);
-        }
-
-        let last = row_buf[max_len - 1];
-        row_buf[max_len..].fill(last);
-        return;
-    }
-
-    let shift = input.info.shift.unwrap_or((0, 0));
-    let grid_dim = input.grid_kind.grid_dim(frame_header, shift);
-    let grid_w = grid_dim.0;
-    let gy = clamped_y / grid_dim.1;
-    let ly = clamped_y % grid_dim.1;
-
-    let global_x_start = xoff as isize - 2;
-    let global_x_end = global_x_start + max_len as isize;
-
-    let left_clamp = (-global_x_start).max(0) as usize;
-    let right_clamp = (global_x_end - w as isize).max(0) as usize;
-
-    let clamped_x_start = global_x_start.max(0) as usize;
-    let clamped_x_end = global_x_end.min(w as isize) as usize;
-
-    if clamped_x_start < clamped_x_end {
-        let gx_start = clamped_x_start / grid_w;
-        let gx_end = (clamped_x_end - 1) / grid_w;
-
-        for gx in gx_start..=gx_end {
-            let tile_x_start = gx * grid_w;
-            let tile_w = (w - tile_x_start).min(grid_w);
-            let intersect_start = clamped_x_start.max(tile_x_start);
-            let intersect_end = clamped_x_end.min(tile_x_start + tile_w);
-
-            if intersect_start < intersect_end {
-                let grid_idx = input.get_grid_idx(input.grid_kind, (gx, gy));
-                let grid_data = input.buffer_grid[grid_idx].data.try_read().unwrap();
-                // Note that smooth-unsqueezing depends on some grid positions that regular
-                // unsqueezing does not, so we might not have all grid positions available.
-                let dest_start = left_clamp + (intersect_start - clamped_x_start);
-                let dest_end = dest_start + (intersect_end - intersect_start);
-                if let Some(chan) = grid_data.as_ref() {
-                    let row = chan.data.row(ly);
-                    let src_start = intersect_start - tile_x_start;
-                    let src_end = intersect_end - tile_x_start;
-                    row_buf[dest_start..dest_end].copy_from_slice(&row[src_start..src_end]);
-                } else {
-                    // Not-yet-decoded tiles are semantically all-zero. Fill
-                    // explicitly: the scratch buffer is reused across rows and
-                    // transforms, so leaving the previous contents in place makes
-                    // the (partial-render) output depend on scheduling order.
-                    row_buf[dest_start..dest_end].fill(0);
-                }
-            }
-        }
-    }
-
-    if left_clamp > 0 {
-        let left_val = {
-            let grid_idx = input.get_grid_idx(input.grid_kind, (0, gy));
-            let grid_data = input.buffer_grid[grid_idx].data.try_read().unwrap();
-            if let Some(chan) = grid_data.as_ref() {
-                chan.data.row(ly)[0]
-            } else {
-                0
-            }
-        };
-        row_buf[..left_clamp].fill(left_val);
-    }
-
-    if right_clamp > 0 {
-        let right_val = {
-            let gx_right = (w - 1) / grid_w;
-            let lx_right = (w - 1) % grid_w;
-            let grid_idx = input.get_grid_idx(input.grid_kind, (gx_right, gy));
-            let grid_data = input.buffer_grid[grid_idx].data.try_read().unwrap();
-            if let Some(chan) = grid_data.as_ref() {
-                chan.data.row(ly)[lx_right]
-            } else {
-                0
-            }
-        };
-        row_buf[max_len - right_clamp..max_len].fill(right_val);
-    }
-
-    let last = row_buf[max_len - 1];
-    row_buf[max_len..].fill(last);
-}
-
 fn make_float<D: SimdDescriptor>(d: D, inp: &[i32], out: &mut [f32]) {
     for (i, o) in inp
         .chunks_exact(D::I32Vec::LEN)
@@ -1008,10 +895,7 @@ fn make_float<D: SimdDescriptor>(d: D, inp: &[i32], out: &mut [f32]) {
 #[inline(always)]
 fn smooth_2d_unsqueeze_simd_impl<D: SimdDescriptor>(
     d: D,
-    // TODO(veluca): modify this to *not* take a full ModularBufferInfo, but to let the caller
-    // extract appropriate buffers.
-    input: &ModularBufferInfo,
-    frame_header: &FrameHeader,
+    input: &TiledChannelView<'_>,
     rect: Rect,
     output: &mut Image<i32>,
     (buffer, ibuf): &mut ([Vec<f32>; 5], Vec<i32>),
@@ -1028,7 +912,7 @@ fn smooth_2d_unsqueeze_simd_impl<D: SimdDescriptor>(
 
     for (dy, buf) in buffer.iter_mut().enumerate().take(4) {
         let yg = (row_offset + dy) as isize - 2;
-        load_row_to_scratch(ibuf, input, frame_header, yg, col_offset, in_xs + 4);
+        input.load_row_to_scratch(yg, col_offset, in_xs + 4, ibuf);
         make_float(d, ibuf, buf);
     }
 
@@ -1036,7 +920,7 @@ fn smooth_2d_unsqueeze_simd_impl<D: SimdDescriptor>(
     // We populate the fifth row at the start of the loop.
     for iy_center in 0..ys.div_ceil(2) {
         let yg = (row_offset + iy_center) as isize + 2;
-        load_row_to_scratch(ibuf, input, frame_header, yg, col_offset, in_xs + 4);
+        input.load_row_to_scratch(yg, col_offset, in_xs + 4, ibuf);
         make_float(d, ibuf, &mut buffer[4]);
 
         const { assert!(IMAGE_OFFSET.1 > 0) };
@@ -1120,21 +1004,19 @@ simd_function!(
     smooth_2d_unsqueeze,
     d: D,
     pub fn smooth_2d_unsqueeze_simd_dispatch(
-        input: &ModularBufferInfo,
-        frame_header: &FrameHeader,
+        input: &TiledChannelView<'_>,
         rect: Rect,
         output: &mut Image<i32>,
         buffer: &mut ([Vec<f32>; 5], Vec<i32>)
     ) {
-        smooth_2d_unsqueeze_simd_impl(d, input, frame_header, rect, output, buffer);
+        smooth_2d_unsqueeze_simd_impl(d, input, rect, output, buffer);
     }
 );
 
 #[inline(always)]
 fn smooth_h_unsqueeze_simd_impl<D: SimdDescriptor>(
     d: D,
-    input: &ModularBufferInfo,
-    frame_header: &FrameHeader,
+    input: &TiledChannelView<'_>,
     rect: Rect,
     output: &mut Image<i32>,
     (buffer, ibuf): &mut ([Vec<f32>; 5], Vec<i32>),
@@ -1149,18 +1031,18 @@ fn smooth_h_unsqueeze_simd_impl<D: SimdDescriptor>(
     }
     init_buffers(buffer, ibuf, in_xs + 2 * lanes + 8);
 
-    for (dy, buf) in buffer.iter_mut().enumerate().take(2) {
-        let yg = (row_offset + dy) as isize - 1;
-        load_row_to_scratch(ibuf, input, frame_header, yg, col_offset, in_xs + 4);
+    for (dy, buf) in buffer.iter_mut().enumerate().take(4) {
+        let yg = (row_offset + dy) as isize - 2;
+        input.load_row_to_scratch(yg, col_offset, in_xs + 4, ibuf);
         make_float(d, ibuf, buf);
     }
 
-    // Loop invariant: at the start of the loop, buffer[0..2] contains the first 2 rows needed.
-    // We populate the third row at the start of the loop.
+    // Loop invariant: at the start of the loop, buffer[0..4] contains the first 4 rows needed.
+    // We populate the fifth row at the start of the loop.
     for iy_center in 0..ys {
-        let yg = (row_offset + iy_center) as isize + 1;
-        load_row_to_scratch(ibuf, input, frame_header, yg, col_offset, in_xs + 4);
-        make_float(d, ibuf, &mut buffer[2]);
+        let yg = (row_offset + iy_center) as isize + 2;
+        input.load_row_to_scratch(yg, col_offset, in_xs + 4, ibuf);
+        make_float(d, ibuf, &mut buffer[4]);
 
         let output_row = output.row_mut(iy_center);
 
@@ -1168,10 +1050,12 @@ fn smooth_h_unsqueeze_simd_impl<D: SimdDescriptor>(
             .windows(lanes + 4)
             .zip(buffer[1].windows(lanes + 4))
             .zip(buffer[2].windows(lanes + 4))
+            .zip(buffer[3].windows(lanes + 4))
+            .zip(buffer[4].windows(lanes + 4))
             .step_by(lanes)
             .zip(output_row.chunks_mut(2 * lanes));
-        for (((r0, r1), r2), out) in row_iters {
-            let mut n = [D::F32Vec::zero(d); 15];
+        for (((((r0, r1), r2), r3), r4), out) in row_iters {
+            let mut n = [D::F32Vec::zero(d); 25];
             n[0] = D::F32Vec::load(d, r0);
             n[1] = D::F32Vec::load(d, &r0[1..]);
             n[2] = D::F32Vec::load(d, &r0[2..]);
@@ -1189,6 +1073,18 @@ fn smooth_h_unsqueeze_simd_impl<D: SimdDescriptor>(
             n[12] = D::F32Vec::load(d, &r2[2..]);
             n[13] = D::F32Vec::load(d, &r2[3..]);
             n[14] = D::F32Vec::load(d, &r2[4..]);
+
+            n[15] = D::F32Vec::load(d, r3);
+            n[16] = D::F32Vec::load(d, &r3[1..]);
+            n[17] = D::F32Vec::load(d, &r3[2..]);
+            n[18] = D::F32Vec::load(d, &r3[3..]);
+            n[19] = D::F32Vec::load(d, &r3[4..]);
+
+            n[20] = D::F32Vec::load(d, r4);
+            n[21] = D::F32Vec::load(d, &r4[1..]);
+            n[22] = D::F32Vec::load(d, &r4[2..]);
+            n[23] = D::F32Vec::load(d, &r4[3..]);
+            n[24] = D::F32Vec::load(d, &r4[4..]);
 
             let (out_even, out_odd) = convolve_1d_simd(d, &n);
 
@@ -1211,21 +1107,19 @@ simd_function!(
     smooth_h_unsqueeze,
     d: D,
     pub fn smooth_h_unsqueeze_simd_dispatch(
-        input: &ModularBufferInfo,
-        frame_header: &FrameHeader,
+        input: &TiledChannelView<'_>,
         rect: Rect,
         output: &mut Image<i32>,
         buffer: &mut ([Vec<f32>; 5], Vec<i32>)
     ) {
-        smooth_h_unsqueeze_simd_impl(d, input, frame_header, rect, output, buffer);
+        smooth_h_unsqueeze_simd_impl(d, input, rect, output, buffer);
     }
 );
 
 #[inline(always)]
 fn smooth_v_unsqueeze_simd_impl<D: SimdDescriptor>(
     d: D,
-    input: &ModularBufferInfo,
-    frame_header: &FrameHeader,
+    input: &TiledChannelView<'_>,
     rect: Rect,
     output: &mut Image<i32>,
     (buffer, ibuf): &mut ([Vec<f32>; 5], Vec<i32>),
@@ -1242,7 +1136,7 @@ fn smooth_v_unsqueeze_simd_impl<D: SimdDescriptor>(
 
     for (dy, buf) in buffer.iter_mut().enumerate().take(4) {
         let yg = (row_offset + dy) as isize - 2;
-        load_row_to_scratch(ibuf, input, frame_header, yg, col_offset, in_xs + 4);
+        input.load_row_to_scratch(yg, col_offset, in_xs + 4, ibuf);
         make_float(d, ibuf, buf);
     }
 
@@ -1250,7 +1144,7 @@ fn smooth_v_unsqueeze_simd_impl<D: SimdDescriptor>(
     // We populate the fifth row at the start of the loop.
     for iy_center in 0..ys.div_ceil(2) {
         let yg = (row_offset + iy_center) as isize + 2;
-        load_row_to_scratch(ibuf, input, frame_header, yg, col_offset, in_xs + 4);
+        input.load_row_to_scratch(yg, col_offset, in_xs + 4, ibuf);
         make_float(d, ibuf, &mut buffer[4]);
 
         const { assert!(IMAGE_OFFSET.1 > 0) };
@@ -1268,17 +1162,17 @@ fn smooth_v_unsqueeze_simd_impl<D: SimdDescriptor>(
         let output_row_0 = &mut output_row_0[offset.0..offset.0 + xs];
         let output_row_1 = &mut output_row_1[offset.1..offset.1 + xs];
 
-        let row_iters = buffer[0][1..]
-            .windows(lanes + 2)
-            .zip(buffer[1][1..].windows(lanes + 2))
-            .zip(buffer[2][1..].windows(lanes + 2))
-            .zip(buffer[3][1..].windows(lanes + 2))
-            .zip(buffer[4][1..].windows(lanes + 2))
+        let row_iters = buffer[0]
+            .windows(lanes + 4)
+            .zip(buffer[1].windows(lanes + 4))
+            .zip(buffer[2].windows(lanes + 4))
+            .zip(buffer[3].windows(lanes + 4))
+            .zip(buffer[4].windows(lanes + 4))
             .step_by(lanes)
             .zip(output_row_0.chunks_mut(lanes))
             .zip(output_row_1.chunks_mut(lanes));
         for ((((((r0, r1), r2), r3), r4), out0), out1) in row_iters {
-            let mut n = [D::F32Vec::zero(d); 15];
+            let mut n = [D::F32Vec::zero(d); 25];
             n[0] = D::F32Vec::load(d, r0);
             n[1] = D::F32Vec::load(d, r1);
             n[2] = D::F32Vec::load(d, r2);
@@ -1296,6 +1190,18 @@ fn smooth_v_unsqueeze_simd_impl<D: SimdDescriptor>(
             n[12] = D::F32Vec::load(d, &r2[2..]);
             n[13] = D::F32Vec::load(d, &r3[2..]);
             n[14] = D::F32Vec::load(d, &r4[2..]);
+
+            n[15] = D::F32Vec::load(d, &r0[3..]);
+            n[16] = D::F32Vec::load(d, &r1[3..]);
+            n[17] = D::F32Vec::load(d, &r2[3..]);
+            n[18] = D::F32Vec::load(d, &r3[3..]);
+            n[19] = D::F32Vec::load(d, &r4[3..]);
+
+            n[20] = D::F32Vec::load(d, &r0[4..]);
+            n[21] = D::F32Vec::load(d, &r1[4..]);
+            n[22] = D::F32Vec::load(d, &r2[4..]);
+            n[23] = D::F32Vec::load(d, &r3[4..]);
+            n[24] = D::F32Vec::load(d, &r4[4..]);
 
             let (out_py0, out_py1) = convolve_1d_simd(d, &n);
 
@@ -1322,12 +1228,98 @@ simd_function!(
     smooth_v_unsqueeze,
     d: D,
     pub fn smooth_v_unsqueeze_simd_dispatch(
-        input: &ModularBufferInfo,
-        frame_header: &FrameHeader,
+        input: &TiledChannelView<'_>,
         rect: Rect,
         output: &mut Image<i32>,
         buffer: &mut ([Vec<f32>; 5], Vec<i32>)
     ) {
-        smooth_v_unsqueeze_simd_impl(d, input, frame_header, rect, output, buffer);
+        smooth_v_unsqueeze_simd_impl(d, input, rect, output, buffer);
     }
 );
+
+#[cfg(test)]
+mod tests {
+    use jxl_simd::ScalarDescriptor;
+
+    use super::*;
+
+    #[test]
+    fn test_convolve_2d_constant() {
+        let d = ScalarDescriptor {};
+        for val in [-1000.0, -1.0, 0.0, 1.0, 42.0, 255.0, 10000.0] {
+            let n = [val; 25];
+            let (out_0_0, out_0_1, out_1_0, out_1_1) = convolve_2d_simd(d, &n);
+            assert_eq!(out_0_0.0, val as i32, "out_0_0 mismatch for {val}");
+            assert_eq!(out_0_1.0, val as i32, "out_0_1 mismatch for {val}");
+            assert_eq!(out_1_0.0, val as i32, "out_1_0 mismatch for {val}");
+            assert_eq!(out_1_1.0, val as i32, "out_1_1 mismatch for {val}");
+        }
+    }
+
+    #[test]
+    fn test_convolve_1d_constant() {
+        let d = ScalarDescriptor {};
+        for val in [-1000.0, -1.0, 0.0, 1.0, 42.0, 255.0, 10000.0] {
+            let n = [val; 25];
+            let (out_even, out_odd) = convolve_1d_simd(d, &n);
+            assert_eq!(out_even.0, val as i32, "out_even mismatch for {val}");
+            assert_eq!(out_odd.0, val as i32, "out_odd mismatch for {val}");
+        }
+    }
+
+    #[test]
+    fn test_convolve_2d_symmetry() {
+        let d = ScalarDescriptor {};
+        // Create an asymmetric 5x5 impulse at corner
+        let mut n = [0.0f32; 25];
+        n[6] = 10000.0; // row 1, col 1
+
+        let (o00, o01, o10, o11) = convolve_2d_simd(d, &n);
+
+        // Flipped horizontally (col 1 -> col 3, so index 6 -> 8)
+        let mut n_h = [0.0f32; 25];
+        n_h[8] = 10000.0;
+        let (h00, h01, h10, h11) = convolve_2d_simd(d, &n_h);
+        assert_eq!(o00, h01);
+        assert_eq!(o01, h00);
+        assert_eq!(o10, h11);
+        assert_eq!(o11, h10);
+
+        // Flipped vertically (row 1 -> row 3, so index 6 -> 16)
+        let mut n_v = [0.0f32; 25];
+        n_v[16] = 10000.0;
+        let (v00, v01, v10, v11) = convolve_2d_simd(d, &n_v);
+        assert_eq!(o00, v10);
+        assert_eq!(o01, v11);
+        assert_eq!(o10, v00);
+        assert_eq!(o11, v01);
+    }
+
+    #[test]
+    fn test_convolve_1d_symmetry() {
+        let d = ScalarDescriptor {};
+        let mut n = [0.0f32; 25];
+        n[7] = 10000.0; // row 1, col 2
+
+        let (even, odd) = convolve_1d_simd(d, &n);
+
+        // Flip vertically (row 1 -> row 3, so index 7 -> 17)
+        let mut n_v = [0.0f32; 25];
+        n_v[17] = 10000.0;
+        let (v_even, v_odd) = convolve_1d_simd(d, &n_v);
+        assert_eq!(even, v_even);
+        assert_eq!(odd, v_odd);
+
+        // Flip horizontally (col 2 -> col 2, but for col 1 vs col 3: index 6 -> 8)
+        let mut n_h1 = [0.0f32; 25];
+        n_h1[6] = 10000.0;
+        let (h1_even, h1_odd) = convolve_1d_simd(d, &n_h1);
+
+        let mut n_h2 = [0.0f32; 25];
+        n_h2[8] = 10000.0;
+        let (h2_even, h2_odd) = convolve_1d_simd(d, &n_h2);
+
+        assert_eq!(h1_even, h2_odd);
+        assert_eq!(h1_odd, h2_even);
+    }
+}
