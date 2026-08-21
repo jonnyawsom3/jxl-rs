@@ -88,16 +88,15 @@ enum SqueezeStepKind {
 }
 
 #[derive(Debug)]
-struct SqueezeInfo<T> {
+struct SqueezeInfo {
     kind: SqueezeStepKind,
     out_rect: Rect,
-    in_avg: T,
+    in_avg: (usize, usize),
     avg_rect: Rect,
-    in_res: T,
+    in_res: (usize, usize),
     res_rect: Rect,
-    in_next_avg: Option<T>,
-    out_prev: Option<T>,
-    next_avg_rect: Option<Rect>,
+    in_next_avg: Option<(usize, usize)>,
+    out_prev: Option<(usize, usize)>,
 }
 
 fn borrow_channel(
@@ -107,7 +106,21 @@ fn borrow_channel(
     buffers[x.0].buffer_grid[x.1].data.try_read().unwrap()
 }
 
-impl SqueezeInfo<(usize, usize)> {
+fn borrow_topbottom(
+    buffers: &[ModularBufferInfo],
+    x: (usize, usize),
+) -> RwLockReadGuard<'_, Option<Image<i32>>> {
+    buffers[x.0].buffer_grid[x.1].topbottom.try_read().unwrap()
+}
+
+fn borrow_leftright(
+    buffers: &[ModularBufferInfo],
+    x: (usize, usize),
+) -> RwLockReadGuard<'_, Option<Image<i32>>> {
+    buffers[x.0].buffer_grid[x.1].leftright.try_read().unwrap()
+}
+
+impl SqueezeInfo {
     fn new(
         buffers: &[ModularBufferInfo],
         buf_in: [usize; 2],
@@ -155,46 +168,51 @@ impl SqueezeInfo<(usize, usize)> {
         } else {
             (gx > 0).then(|| (gx - 1, gy))
         };
-        let next_avg_grid = pos_next.map(|x| buf_avg.get_grid_idx(output_grid_kind, x));
+        let mut avg_rect = buf_avg.get_grid_rect(frame_header, output_grid_kind, output_grid_pos);
+        let next_avg_grid = if let Some(pos) = pos_next {
+            let grid = buf_avg.get_grid_idx(output_grid_kind, pos);
+            if grid == in_grid {
+                if vertical {
+                    avg_rect.size.1 += 1;
+                } else {
+                    avg_rect.size.0 += 1;
+                }
+                None
+            } else {
+                Some(grid)
+            }
+        } else {
+            None
+        };
         let prev_out_grid = pos_prev.map(|x| buffers[buf_out].get_grid_idx(output_grid_kind, x));
-        let next_avg_rect =
-            pos_next.map(|x| buf_avg.get_grid_rect(frame_header, output_grid_kind, x));
         Self {
             kind,
             out_rect,
             in_avg: (buf_in[0], in_grid),
-            avg_rect: buf_avg.get_grid_rect(frame_header, output_grid_kind, output_grid_pos),
+            avg_rect,
             in_res: (buf_in[1], res_grid),
             res_rect: buf_res.get_grid_rect(frame_header, output_grid_kind, output_grid_pos),
             in_next_avg: next_avg_grid.map(|x| (buf_in[0], x)),
             out_prev: prev_out_grid.map(|x| (buf_out, x)),
-            next_avg_rect,
         }
     }
 
     // The lifetimes prevent calling decrement_refs while buffers are still borrowed.
-    fn borrow<'a>(
+    fn borrow_inputs<'a>(
         &'a self,
         buffers: &'a [ModularBufferInfo],
-    ) -> SqueezeInfo<RwLockReadGuard<'a, Option<ModularChannel>>> {
-        // If the average buffer has a coarser grid than the output buffer (or no grid
-        // at all), `in_next_avg` can refer to the same buffer and grid position as
-        // `in_avg`. Avoid taking a second read lock on the same RwLock in that case;
-        // `in_next_avg_rect` falls back to the `in_avg` guard.
-        let in_next_avg = self
-            .in_next_avg
-            .filter(|x| *x != self.in_avg)
-            .map(|x| borrow_channel(buffers, x));
-        SqueezeInfo {
-            kind: self.kind,
-            out_rect: self.out_rect,
+        vertical: bool,
+    ) -> SqueezeInputs<'a> {
+        let borrow_border = if vertical {
+            borrow_topbottom
+        } else {
+            borrow_leftright
+        };
+        SqueezeInputs {
             in_avg: borrow_channel(buffers, self.in_avg),
-            avg_rect: self.avg_rect,
             in_res: borrow_channel(buffers, self.in_res),
-            res_rect: self.res_rect,
-            in_next_avg,
-            out_prev: self.out_prev.map(|x| borrow_channel(buffers, x)),
-            next_avg_rect: self.next_avg_rect,
+            in_next_border: self.in_next_avg.map(|x| borrow_border(buffers, x)),
+            out_prev_border: self.out_prev.map(|x| borrow_border(buffers, x)),
         }
     }
 
@@ -222,41 +240,133 @@ impl SqueezeInfo<(usize, usize)> {
             Some(buf_info.grid_kind.grid_dim(frame_header, shift))
         };
 
-        let mut guards = [[None, None, None], [None, None, None], [None, None, None]];
-        for (dy, row) in guards.iter_mut().enumerate() {
-            for (dx, g) in row.iter_mut().enumerate() {
-                let tile_x = gx as isize + dx as isize - 1;
-                let tile_y = gy as isize + dy as isize - 1;
-                if tile_x >= 0 && tile_x < xs as isize && tile_y >= 0 && tile_y < ys as isize {
-                    let grid_idx = tile_y as usize * xs + tile_x as usize;
-                    *g = Some(borrow_channel(buffers, (b, grid_idx)));
-                }
+        let mut tiles = [const { None }; 9];
+        tiles[4] = Some(TileGuard::Channel(borrow_channel(buffers, (b, g))));
+
+        let borrow_border = |tile_x: isize, tile_y: isize, is_tb: bool| -> Option<TileGuard<'a>> {
+            if tile_x >= 0 && tile_x < xs as isize && tile_y >= 0 && tile_y < ys as isize {
+                let grid_idx = tile_y as usize * xs + tile_x as usize;
+                let guard = if is_tb {
+                    borrow_topbottom(buffers, (b, grid_idx))
+                } else {
+                    borrow_leftright(buffers, (b, grid_idx))
+                };
+                Some(TileGuard::Border(guard))
+            } else {
+                None
             }
+        };
+
+        for dx in 0..3 {
+            let tx = gx as isize + dx as isize - 1;
+            tiles[dx] = borrow_border(tx, gy as isize - 1, true);
+            tiles[6 + dx] = borrow_border(tx, gy as isize + 1, true);
         }
+        tiles[3] = borrow_border(gx as isize - 1, gy as isize, false);
+        tiles[5] = borrow_border(gx as isize + 1, gy as isize, false);
 
         TiledChannelView {
             size: buf_info.info.size,
             grid_dim,
             center_grid_pos: (gx, gy),
-            guards,
+            tiles,
         }
     }
 }
 
-pub struct TiledChannelView<'a> {
+struct SqueezeInputs<'a> {
+    in_avg: RwLockReadGuard<'a, Option<ModularChannel>>,
+    in_res: RwLockReadGuard<'a, Option<ModularChannel>>,
+    in_next_border: Option<RwLockReadGuard<'a, Option<Image<i32>>>>,
+    out_prev_border: Option<RwLockReadGuard<'a, Option<Image<i32>>>>,
+}
+
+impl<'a> SqueezeInputs<'a> {
+    fn in_avg_rect(&self, rect: Rect) -> ImageRect<'_, i32> {
+        self.in_avg.as_ref().unwrap().data.get_rect(rect)
+    }
+
+    fn in_res_rect(&self, rect: Rect) -> ImageRect<'_, i32> {
+        self.in_res.as_ref().unwrap().data.get_rect(rect)
+    }
+
+    fn in_next_border(&self) -> Option<&Image<i32>> {
+        self.in_next_border.as_ref().and_then(|g| g.as_ref())
+    }
+
+    fn out_prev_border(&self) -> Option<&Image<i32>> {
+        self.out_prev_border.as_ref().and_then(|g| g.as_ref())
+    }
+}
+
+enum TileGuard<'a> {
+    Channel(RwLockReadGuard<'a, Option<ModularChannel>>),
+    Border(RwLockReadGuard<'a, Option<Image<i32>>>),
+}
+
+impl<'a> std::ops::Deref for TileGuard<'a> {
+    type Target = Image<i32>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            TileGuard::Channel(g) => &g.as_ref().unwrap().data,
+            TileGuard::Border(g) => g.as_ref().unwrap(),
+        }
+    }
+}
+
+pub(super) struct TiledChannelView<'a> {
     size: (usize, usize),
     grid_dim: Option<(usize, usize)>,
     center_grid_pos: (usize, usize),
-    // 3x3 array of borrowed image tiles: [dy][dx] where [1][1] is center (gx, gy)
-    guards: [[Option<RwLockReadGuard<'a, Option<ModularChannel>>>; 3]; 3],
+    tiles: [Option<TileGuard<'a>>; 9],
 }
 
 impl<'a> TiledChannelView<'a> {
     #[inline(always)]
-    fn tile(&self, dy: usize, dx: usize) -> Option<&Image<i32>> {
-        self.guards[dy][dx]
-            .as_ref()
-            .and_then(|guard| guard.as_ref().map(|mc| &mc.data))
+    fn top_border_row(ly: usize, top_tile_h: usize) -> usize {
+        if top_tile_h <= 1 || ly == top_tile_h - 1 {
+            3
+        } else {
+            2
+        }
+    }
+
+    #[inline(always)]
+    fn bottom_border_row(ly: usize) -> usize {
+        if ly == 0 { 0 } else { 1 }
+    }
+
+    fn copy_tile_slice(
+        &self,
+        (dx, dy): (usize, usize),
+        ly: usize,
+        src_range: std::ops::Range<usize>,
+        tile_w: usize,
+        top_tile_h: usize,
+        dest: &mut [i32],
+    ) {
+        let img = self.tiles[dy * 3 + dx].as_deref().unwrap();
+        match (dy, dx) {
+            (1, 1) => {
+                dest.copy_from_slice(&img.row(ly)[src_range]);
+            }
+            (0, _) => {
+                dest.copy_from_slice(&img.row(Self::top_border_row(ly, top_tile_h))[src_range]);
+            }
+            (2, _) => {
+                dest.copy_from_slice(&img.row(Self::bottom_border_row(ly))[src_range]);
+            }
+            (1, 0) => {
+                let offset_start = 4 - (tile_w - src_range.start);
+                let offset_end = 4 - (tile_w - src_range.end);
+                dest.copy_from_slice(&img.row(ly)[offset_start..offset_end]);
+            }
+            (1, 2) => {
+                dest.copy_from_slice(&img.row(ly)[src_range]);
+            }
+            _ => unreachable!(),
+        }
     }
 
     pub fn load_row_to_scratch(
@@ -285,7 +395,7 @@ impl<'a> TiledChannelView<'a> {
         };
 
         let Some(grid_dim) = self.grid_dim else {
-            let row = self.tile(1, 1).unwrap().row(clamped_y);
+            let row = self.tiles[4].as_deref().unwrap().row(clamped_y);
 
             let left_clamp = (2 - xoff as isize).max(0) as usize;
             let right_clamp_start = (w as isize + 2 - xoff as isize).min(max_len as isize) as usize;
@@ -310,11 +420,17 @@ impl<'a> TiledChannelView<'a> {
             return;
         };
 
-        let grid_w = grid_dim.0;
+        let (grid_w, grid_h) = grid_dim;
         let (gx_center, gy_center) = self.center_grid_pos;
-        let gy = clamped_y / grid_dim.1;
-        let ly = clamped_y % grid_dim.1;
+        let gy = clamped_y / grid_h;
+        let ly = clamped_y % grid_h;
         let dy = (gy as isize - gy_center as isize + 1) as usize;
+
+        let top_tile_h = if gy_center > 0 {
+            (h - (gy_center - 1) * grid_h).min(grid_h)
+        } else {
+            grid_h
+        };
 
         let global_x_start = xoff as isize - 2;
         let global_x_end = global_x_start + max_len as isize;
@@ -339,24 +455,33 @@ impl<'a> TiledChannelView<'a> {
                 if intersect_start < intersect_end {
                     let dest_start = left_clamp + (intersect_start - clamped_x_start);
                     let dest_end = dest_start + (intersect_end - intersect_start);
-                    if let Some(chan) = self.tile(dy, dx) {
-                        let row = chan.row(ly);
-                        let src_start = intersect_start - tile_x_start;
-                        let src_end = intersect_end - tile_x_start;
-                        row_buf[dest_start..dest_end].copy_from_slice(&row[src_start..src_end]);
-                    } else {
-                        // Not-yet-decoded tiles are semantically all-zero. Fill
-                        // explicitly: the scratch buffer is reused across rows and
-                        // transforms, so leaving the previous contents in place makes
-                        // the (partial-render) output depend on scheduling order.
-                        row_buf[dest_start..dest_end].fill(0);
-                    }
+                    let src_start = intersect_start - tile_x_start;
+                    let src_end = intersect_end - tile_x_start;
+                    self.copy_tile_slice(
+                        (dx, dy),
+                        ly,
+                        src_start..src_end,
+                        tile_w,
+                        top_tile_h,
+                        &mut row_buf[dest_start..dest_end],
+                    );
                 }
             }
         }
 
         if left_clamp > 0 {
-            let left_val = self.tile(dy, 1).map(|chan| chan.row(ly)[0]).unwrap_or(0);
+            let left_val = match dy {
+                1 => self.tiles[4].as_deref().unwrap().row(ly)[0],
+                0 => self.tiles[1]
+                    .as_deref()
+                    .unwrap()
+                    .row(Self::top_border_row(ly, top_tile_h))[0],
+                2 => self.tiles[7]
+                    .as_deref()
+                    .unwrap()
+                    .row(Self::bottom_border_row(ly))[0],
+                _ => 0,
+            };
             row_buf[..left_clamp].fill(left_val);
         }
 
@@ -364,31 +489,24 @@ impl<'a> TiledChannelView<'a> {
             let gx_right = (w - 1) / grid_w;
             let lx_right = (w - 1) % grid_w;
             let dx = (gx_right as isize - gx_center as isize + 1) as usize;
-            let right_val = self
-                .tile(dy, dx)
-                .map(|chan| chan.row(ly)[lx_right])
-                .unwrap_or(0);
+            let right_val = match (dy, dx) {
+                (1, 1) => self.tiles[4].as_deref().unwrap().row(ly)[lx_right],
+                (1, 2) => self.tiles[5].as_deref().unwrap().row(ly)[3],
+                (0, 1 | 2) => self.tiles[dx]
+                    .as_deref()
+                    .unwrap()
+                    .row(Self::top_border_row(ly, top_tile_h))[lx_right],
+                (2, 1 | 2) => self.tiles[6 + dx]
+                    .as_deref()
+                    .unwrap()
+                    .row(Self::bottom_border_row(ly))[lx_right],
+                _ => 0,
+            };
             row_buf[max_len - right_clamp..max_len].fill(right_val);
         }
 
         let last = row_buf[max_len - 1];
         row_buf[max_len..].fill(last);
-    }
-}
-
-impl<'a> SqueezeInfo<RwLockReadGuard<'a, Option<ModularChannel>>> {
-    fn in_avg_rect(&self) -> ImageRect<'_, i32> {
-        self.in_avg.as_ref().unwrap().data.get_rect(self.avg_rect)
-    }
-    fn in_res_rect(&self) -> ImageRect<'_, i32> {
-        self.in_res.as_ref().unwrap().data.get_rect(self.res_rect)
-    }
-    fn in_next_avg_rect(&self) -> Option<ImageRect<'_, i32>> {
-        let rect = self.next_avg_rect?;
-        // `in_next_avg` is None (while `next_avg_rect` is Some) when it aliases
-        // `in_avg`; use the `in_avg` guard in that case.
-        let guard = self.in_next_avg.as_ref().unwrap_or(&self.in_avg);
-        Some(guard.as_ref().unwrap().data.get_rect(rect))
     }
 }
 
@@ -443,7 +561,7 @@ impl TransformStepChunk {
         &self,
         frame_header: &FrameHeader,
         buffers: &[ModularBufferInfo],
-        tranform_scratch_space: &mut TransformScratchSpace,
+        transform_scratch_space: &mut TransformScratchSpace,
         pass_to_pipeline: &dyn Fn(usize, usize, bool, Image<i32>) -> Result<()>,
     ) -> Result<()> {
         let is_final = self.missing_final_deps == 0;
@@ -528,33 +646,36 @@ impl TransformStepChunk {
                     let grid_shape = buffers[buf_out[0]].grid_shape;
                     let grid_x = out_grid % grid_shape.0;
                     let grid_y = out_grid / grid_shape.0;
-                    let border = if *predictor == Predictor::Zero { 0 } else { 1 };
-                    let has_left = border > 0 && grid_x > 0;
-                    let has_top = border > 0 && grid_y > 0;
-                    // Neighbouring grid positions are only read as prediction context,
-                    // so take read locks on them: other transforms (e.g. Output) may
-                    // read them concurrently.
-                    let ctx_guards = |dx: usize, dy: usize| {
+                    let has_left = *predictor != Predictor::Zero && grid_x > 0;
+                    let has_top = *predictor != Predictor::Zero && grid_y > 0;
+                    let borrow_border_guards = |grid_idx: usize, is_lr: bool| {
                         buf_out
                             .iter()
                             .map(|i| {
-                                let grid = (grid_y - dy) * grid_shape.0 + (grid_x - dx);
-                                borrow_channel(buffers, (*i, grid))
+                                if is_lr {
+                                    borrow_leftright(buffers, (*i, grid_idx))
+                                } else {
+                                    borrow_topbottom(buffers, (*i, grid_idx))
+                                }
                             })
                             .collect::<Vec<_>>()
                     };
-                    let left_guards = has_left.then(|| ctx_guards(1, 0));
-                    let top_guards = has_top.then(|| ctx_guards(0, 1));
-                    let topleft_guards = (has_left && has_top).then(|| ctx_guards(1, 1));
-                    let left_refs: Option<Vec<&ModularChannel>> = left_guards
+                    let stride = grid_shape.0;
+                    let left_guards = has_left
+                        .then(|| borrow_border_guards(grid_y * stride + (grid_x - 1), true));
+                    let top_guards = has_top
+                        .then(|| borrow_border_guards((grid_y - 1) * stride + grid_x, false));
+                    let topleft_guards = (has_left && has_top)
+                        .then(|| borrow_border_guards((grid_y - 1) * stride + (grid_x - 1), false));
+                    let left_refs = left_guards
                         .as_ref()
-                        .map(|g| g.iter().map(|x| x.as_ref().unwrap()).collect());
-                    let top_refs: Option<Vec<&ModularChannel>> = top_guards
+                        .map(|v| v.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>());
+                    let top_refs = top_guards
                         .as_ref()
-                        .map(|g| g.iter().map(|x| x.as_ref().unwrap()).collect());
-                    let topleft_refs: Option<Vec<&ModularChannel>> = topleft_guards
+                        .map(|v| v.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>());
+                    let topleft_refs = topleft_guards
                         .as_ref()
-                        .map(|g| g.iter().map(|x| x.as_ref().unwrap()).collect());
+                        .map(|v| v.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>());
                     let mut guards = vec![];
                     for i in buf_out {
                         let b = &buffers[*i].buffer_grid[out_grid];
@@ -583,6 +704,7 @@ impl TransformStepChunk {
                             *num_colors,
                             *num_deltas,
                             *predictor,
+                            &mut transform_scratch_space.palette_row_scratch,
                         );
                     }
                 }
@@ -619,16 +741,28 @@ impl TransformStepChunk {
                     // context, so take read locks on it: other transforms (e.g.
                     // Output) may read it concurrently.
                     let mut prev_guards = vec![];
+                    let mut prev_aux_guards = vec![];
                     if grid_y > 0 {
                         for i in buf_out {
                             for grid_x in 0..grid_shape.0 {
                                 let grid = (grid_y - 1) * grid_shape.0 + grid_x;
-                                prev_guards.push(borrow_channel(buffers, (*i, grid)));
+                                prev_guards.push(borrow_topbottom(buffers, (*i, grid)));
+                            }
+                            if *predictor == Predictor::Weighted {
+                                let grid = (grid_y - 1) * grid_shape.0;
+                                prev_aux_guards.push(
+                                    buffers[*i].buffer_grid[grid]
+                                        .auxiliary_data
+                                        .try_read()
+                                        .unwrap(),
+                                );
                             }
                         }
                     }
-                    let prev_refs: Vec<&ModularChannel> =
+                    let prev_refs: Vec<&Image<i32>> =
                         prev_guards.iter().map(|g| g.as_ref().unwrap()).collect();
+                    let prev_aux_refs: Vec<Option<&Image<i32>>> =
+                        prev_aux_guards.iter().map(|g| g.as_ref()).collect();
                     let mut guards = vec![];
                     for i in buf_out {
                         for grid_x in 0..grid_shape.0 {
@@ -639,16 +773,33 @@ impl TransformStepChunk {
                     }
                     let mut out_buf_refs: Vec<&mut ModularChannel> =
                         guards.iter_mut().map(|g| g.as_mut().unwrap()).collect();
+                    let mut aux_out: Vec<_> = if *predictor == Predictor::Weighted {
+                        buf_out
+                            .iter()
+                            .map(|i| {
+                                buffers[*i].buffer_grid[grid_y * grid_shape.0]
+                                    .auxiliary_data
+                                    .try_write()
+                                    .unwrap()
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    };
                     super::palette::do_palette_step_group_row(
                         &in_buf_refs,
                         img_pal.as_ref().unwrap(),
                         &mut out_buf_refs,
                         (grid_y > 0).then_some(&prev_refs[..]),
+                        (grid_y > 0 && *predictor == Predictor::Weighted)
+                            .then_some(&prev_aux_refs[..]),
+                        &mut aux_out,
                         grid_shape.0,
                         *num_colors,
                         *num_deltas,
                         *predictor,
                         wp_header,
+                        &mut transform_scratch_space.palette_row_scratch,
                     )?;
                 }
                 buffers[*buf_pal].buffer_grid[0].mark_used(is_final);
@@ -660,53 +811,13 @@ impl TransformStepChunk {
                 buf_in,
                 buf_out,
                 buf_in_avg,
-            } => {
-                let info = SqueezeInfo::new(
-                    buffers,
-                    *buf_in,
-                    *buf_out,
-                    *buf_in_avg,
-                    self.grid_pos,
-                    frame_header,
-                    false,
-                );
-                trace!(
-                    "HSqueeze {:?} -> {:?}, grid {out_grid} grid pos {:?}: {info:?}",
-                    buf_in, buf_out, self.grid_pos
-                );
-                with_buffers(buffers, &[*buf_out], out_grid, |mut bufs| {
-                    if bufs.is_empty() {
-                        return Ok(());
-                    }
-                    if info.kind != SqueezeStepKind::Regular {
-                        assert_eq!(bufs.len(), 1);
-                        let view = info.borrow_upsample_view(buffers, frame_header);
-                        let scratch = &mut tranform_scratch_space.smooth_unsqueeze_buffer;
-                        if matches!(info.kind, SqueezeStepKind::Upsample2D(..)) {
-                            smooth_2d_unsqueeze(&view, info.out_rect, &mut bufs[0].data, scratch);
-                        } else {
-                            smooth_h_unsqueeze(&view, info.out_rect, &mut bufs[0].data, scratch);
-                        }
-                    } else {
-                        let info = info.borrow(buffers);
-                        let out_prev = info.out_prev.as_ref().map(|g| g.as_ref().unwrap());
-                        super::squeeze::do_hsqueeze_step(
-                            &info.in_avg_rect(),
-                            &info.in_res_rect(),
-                            &info.in_next_avg_rect(),
-                            out_prev,
-                            &mut bufs,
-                        );
-                    }
-                    Ok(())
-                })?;
-                info.decrement_refs(buffers, is_final);
             }
-            TransformStep::VSqueeze {
+            | TransformStep::VSqueeze {
                 buf_in,
                 buf_out,
                 buf_in_avg,
             } => {
+                let vertical = matches!(self.step, TransformStep::VSqueeze { .. });
                 let info = SqueezeInfo::new(
                     buffers,
                     *buf_in,
@@ -714,11 +825,14 @@ impl TransformStepChunk {
                     *buf_in_avg,
                     self.grid_pos,
                     frame_header,
-                    true,
+                    vertical,
                 );
                 trace!(
-                    "VSqueeze {:?} -> {:?}, grid {out_grid} grid pos {:?}: {info:?}",
-                    buf_in, buf_out, self.grid_pos
+                    "{} {:?} -> {:?}, grid {out_grid} grid pos {:?}: {info:?}",
+                    if vertical { "VSqueeze" } else { "HSqueeze" },
+                    buf_in,
+                    buf_out,
+                    self.grid_pos
                 );
                 with_buffers(buffers, &[*buf_out], out_grid, |mut bufs| {
                     if bufs.is_empty() {
@@ -727,22 +841,33 @@ impl TransformStepChunk {
                     if info.kind != SqueezeStepKind::Regular {
                         assert_eq!(bufs.len(), 1);
                         let view = info.borrow_upsample_view(buffers, frame_header);
-                        let scratch = &mut tranform_scratch_space.smooth_unsqueeze_buffer;
+                        let scratch = &mut transform_scratch_space.smooth_unsqueeze_buffer;
                         if matches!(info.kind, SqueezeStepKind::Upsample2D(..)) {
                             smooth_2d_unsqueeze(&view, info.out_rect, &mut bufs[0].data, scratch);
-                        } else {
+                        } else if vertical {
                             smooth_v_unsqueeze(&view, info.out_rect, &mut bufs[0].data, scratch);
+                        } else {
+                            smooth_h_unsqueeze(&view, info.out_rect, &mut bufs[0].data, scratch);
                         }
                     } else {
-                        let info = info.borrow(buffers);
-                        let out_prev = info.out_prev.as_ref().map(|g| g.as_ref().unwrap());
-                        super::squeeze::do_vsqueeze_step(
-                            &info.in_avg_rect(),
-                            &info.in_res_rect(),
-                            &info.in_next_avg_rect(),
-                            out_prev,
-                            &mut bufs,
-                        );
+                        let inputs = info.borrow_inputs(buffers, vertical);
+                        if vertical {
+                            super::squeeze::do_vsqueeze_step(
+                                &inputs.in_avg_rect(info.avg_rect),
+                                &inputs.in_res_rect(info.res_rect),
+                                inputs.in_next_border(),
+                                inputs.out_prev_border(),
+                                &mut bufs,
+                            );
+                        } else {
+                            super::squeeze::do_hsqueeze_step(
+                                &inputs.in_avg_rect(info.avg_rect),
+                                &inputs.in_res_rect(info.res_rect),
+                                inputs.in_next_border(),
+                                inputs.out_prev_border(),
+                                &mut bufs,
+                            );
+                        }
                     }
                     Ok(())
                 })?;
@@ -774,6 +899,10 @@ impl TransformStepChunk {
                 }
             }
         };
+
+        for &(buf, grid) in self.outputs(buffers).iter() {
+            buffers[buf].buffer_grid[grid].extract_needed_borders()?;
+        }
 
         Ok(())
     }
@@ -835,7 +964,7 @@ impl TransformStepChunk {
     // List of input buffers for this transform.
     // We use a stack-size-9 SmallVec because upsampling squeezes touch 9 buffers total (and that is the maximum for
     // non-delta-palette transforms)
-    pub fn dependecies(
+    pub fn dependencies(
         &self,
         buffers: &[ModularBufferInfo],
         frame_header: &FrameHeader,

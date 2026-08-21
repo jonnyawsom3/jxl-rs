@@ -196,6 +196,7 @@ impl ModularBufferInfo {
 
 struct TransformScratchSpace {
     smooth_unsqueeze_buffer: ([Vec<f32>; 5], Vec<i32>),
+    palette_row_scratch: [Vec<i32>; 2],
 }
 
 impl Debug for TransformScratchSpace {
@@ -208,6 +209,7 @@ impl TransformScratchSpace {
     fn new() -> TransformScratchSpace {
         TransformScratchSpace {
             smooth_unsqueeze_buffer: (std::array::from_fn(|_| vec![]), vec![]),
+            palette_row_scratch: [vec![], vec![]],
         }
     }
 }
@@ -548,6 +550,7 @@ impl FullModularImage {
         let mut need_rerender = false;
         for b in self.section_buffer_indices[0].iter().take(num_decoded) {
             let buf = &mut self.buffer_info[*b].buffer_grid[0];
+            buf.extract_needed_borders()?;
             if buf.data_status == DataStatus::Final {
                 continue;
             }
@@ -603,6 +606,10 @@ impl FullModularImage {
                 Ok(())
             },
         )?;
+
+        for b in self.section_buffer_indices[section_id].iter().copied() {
+            self.buffer_info[b].buffer_grid[grid].extract_needed_borders()?;
+        }
 
         self.has_decoded_data.fetch_or(
             !self.section_buffer_indices[section_id].is_empty(),
@@ -668,7 +675,7 @@ impl FullModularImage {
                 }
                 grid.data_status = DataStatus::Final;
                 grid.remaining_uses
-                    .store(grid.used_by_transforms_final.len(), Ordering::Relaxed);
+                    .store(grid.full_uses_count_final, Ordering::Relaxed);
             }
             if let Some(v) = stack.pop() {
                 if !self.transform_steps[v].final_dep_ready() {
@@ -705,13 +712,12 @@ impl FullModularImage {
                 grid,
                 order_only,
             } in self.transform_steps[t]
-                .dependecies(&self.buffer_info, frame_header)
+                .dependencies(&self.buffer_info, frame_header)
                 .iter()
             {
                 let buf = &mut self.buffer_info[*buffer].buffer_grid[*grid];
                 // Force a re-render only of those buffers that we fully use.
-                // TODO(veluca): investigate why we need `buf.has_buffer()` here.
-                if *order_only && buf.has_buffer() {
+                if *order_only && (buf.has_buffer() || buf.has_borders()) {
                     continue;
                 }
                 if let Some(b) = buf.produced_by_step
@@ -741,7 +747,7 @@ impl FullModularImage {
             let mut has_current_deps = false;
             // Add dependency edges from *all* the buffers that will be modified and that are used.
             for TransformDependency { buffer, grid, .. } in self.transform_steps[t]
-                .dependecies(&self.buffer_info, frame_header)
+                .dependencies(&self.buffer_info, frame_header)
                 .iter()
             {
                 if self.rerendered_buffers.contains(&(*buffer, *grid)) {
