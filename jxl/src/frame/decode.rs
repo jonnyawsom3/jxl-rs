@@ -36,7 +36,7 @@ use crate::headers::CustomTransformData;
 use crate::headers::color_encoding::ColorSpace;
 use crate::headers::frame_header::{Encoding, FrameHeader, FrameType};
 use crate::headers::toc::Toc;
-use crate::image::{Image, LocalBufferRecycler, Rect};
+use crate::image::{Image, Rect};
 #[cfg(test)]
 use crate::render::SimpleRenderPipeline;
 use crate::render::buffer_splitter::BufferSplitter;
@@ -163,9 +163,6 @@ impl Frame {
         if frame_header.frame_type == FrameType::LFFrame && frame_header.lf_level == 1 {
             decoder_state.lf_frame_was_rendered = false;
         }
-        decoder_state
-            .buffer_pool
-            .set_limit(Some(frame_header.num_groups()));
         let image_metadata = &decoder_state.file_header.image_metadata;
         let is_gray = !frame_header.do_ycbcr
             && !image_metadata.xyb_encoded
@@ -416,13 +413,11 @@ impl Frame {
 
         let lf_global = self.lf_global.as_mut().unwrap();
 
-        let mut recycler = LocalBufferRecycler::new(&self.decoder_state.buffer_pool);
         if lf_global.modular_global.read_section0(
             &self.header,
             &lf_global.tree,
             br,
             allow_partial,
-            &mut recycler,
         )? {
             // Request a global re-render.
             self.section0_render_up_to_date = false;
@@ -431,7 +426,6 @@ impl Frame {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn decode_lf_group(
         header: &FrameHeader,
         decoder_state: &DecoderState,
@@ -440,7 +434,6 @@ impl Frame {
         br: &mut BitReader,
         lf_splitter: Option<&LfImageSplitter>,
         hf_meta_splitter: Option<&HfMetaSplitter>,
-        recycler: &mut LocalBufferRecycler,
     ) -> Result<()> {
         debug!(section_size = br.total_bits_available());
         let r = header.lf_group_rect(group);
@@ -480,7 +473,6 @@ impl Frame {
             &lf_global.tree,
             br,
             None,
-            recycler,
         )?;
         if header.encoding == Encoding::VarDCT {
             info!("decoding HF metadata with group id {}", group);
@@ -588,7 +580,6 @@ impl Frame {
         group: usize,
         complete: bool,
         buffer_splitter: &BufferSplitter,
-        recycler: &mut LocalBufferRecycler,
     ) -> Result<()> {
         // TODO(sboukortt): consider making this a dedicated stage
         // TODO(veluca): SIMD.
@@ -611,9 +602,9 @@ impl Frame {
 
         // Get all 3 noise channel buffers upfront
         let mut bufs = [
-            pipeline!(self, p, p.get_buffer(num_channels, recycler)?),
-            pipeline!(self, p, p.get_buffer(num_channels + 1, recycler)?),
-            pipeline!(self, p, p.get_buffer(num_channels + 2, recycler)?),
+            pipeline!(self, p, p.get_buffer(num_channels)?),
+            pipeline!(self, p, p.get_buffer(num_channels + 1)?),
+            pipeline!(self, p, p.get_buffer(num_channels + 2)?),
         ];
 
         const FLOATS_PER_BATCH: usize =
@@ -681,50 +672,28 @@ impl Frame {
         pipeline!(
             self,
             p,
-            p.set_buffer_for_group(
-                num_channels,
-                group,
-                complete,
-                buf0,
-                buffer_splitter,
-                recycler
-            )?
+            p.set_buffer_for_group(num_channels, group, complete, buf0, buffer_splitter)?
         );
         pipeline!(
             self,
             p,
-            p.set_buffer_for_group(
-                num_channels + 1,
-                group,
-                complete,
-                buf1,
-                buffer_splitter,
-                recycler
-            )?
+            p.set_buffer_for_group(num_channels + 1, group, complete, buf1, buffer_splitter)?
         );
         pipeline!(
             self,
             p,
-            p.set_buffer_for_group(
-                num_channels + 2,
-                group,
-                complete,
-                buf2,
-                buffer_splitter,
-                recycler
-            )?
+            p.set_buffer_for_group(num_channels + 2, group, complete, buf2, buffer_splitter)?
         );
         Ok(())
     }
 
-    #[instrument(level = "debug", skip(self, passes, buffer_splitter, recycler))]
+    #[instrument(level = "debug", skip(self, passes, buffer_splitter))]
     pub fn decode_and_render_varct_and_noise(
         &self,
         group: usize,
         passes: &mut [(usize, BitReader)],
         buffer_splitter: &BufferSplitter,
         force_render: bool,
-        recycler: &mut LocalBufferRecycler,
     ) -> Result<()> {
         // Group was fully rendered already, nothing to do.
         if self.group_status.final_vardct_render_done.contains(&group) {
@@ -746,7 +715,7 @@ impl Frame {
         }
 
         if self.header.has_noise() && render_vardct {
-            self.render_noise_for_group(group, complete, buffer_splitter, recycler)?;
+            self.render_noise_for_group(group, complete, buffer_splitter)?;
         }
 
         if self.header.encoding != Encoding::VarDCT {
@@ -756,9 +725,9 @@ impl Frame {
         let lf_global = self.lf_global.as_ref().unwrap();
         let mut pixels = if render_vardct {
             Some([
-                pipeline!(self, p, p.get_buffer(0, recycler)?),
-                pipeline!(self, p, p.get_buffer(1, recycler)?),
-                pipeline!(self, p, p.get_buffer(2, recycler)?),
+                pipeline!(self, p, p.get_buffer(0))?,
+                pipeline!(self, p, p.get_buffer(1))?,
+                pipeline!(self, p, p.get_buffer(2))?,
             ])
         } else {
             None
@@ -809,7 +778,7 @@ impl Frame {
                 pipeline!(
                     self,
                     p,
-                    p.set_buffer_for_group(c, group, complete, img, buffer_splitter, recycler)?
+                    p.set_buffer_for_group(c, group, complete, img, buffer_splitter)?
                 );
             }
         }
@@ -817,36 +786,25 @@ impl Frame {
         Ok(())
     }
 
-    #[instrument(level = "debug", skip(self, passes, buffer_splitter, recycler))]
+    #[instrument(level = "debug", skip(self, passes, buffer_splitter))]
     pub fn decode_hf_group(
         &self,
         group: usize,
         passes: &mut [(usize, BitReader)],
         buffer_splitter: &BufferSplitter,
         force_render: bool,
-        recycler: &mut LocalBufferRecycler,
     ) -> Result<()> {
         if passes.is_empty() {
             assert!(force_render);
         }
 
-        self.decode_and_render_varct_and_noise(
-            group,
-            passes,
-            buffer_splitter,
-            force_render,
-            recycler,
-        )?;
+        self.decode_and_render_varct_and_noise(group, passes, buffer_splitter, force_render)?;
 
-        let pass_to_pipeline = |chan,
-                                group,
-                                complete,
-                                image: Image<i32>,
-                                recycler: &mut LocalBufferRecycler| {
+        let pass_to_pipeline = |chan, group, complete, image: Image<i32>| {
             pipeline!(
                 self,
                 p,
-                p.set_buffer_for_group(chan, group, complete, image, &*buffer_splitter, recycler)?
+                p.set_buffer_for_group(chan, group, complete, image, &*buffer_splitter)?
             );
             Ok(())
         };
@@ -859,7 +817,6 @@ impl Frame {
                 &lf_global.tree,
                 br,
                 Some(&pass_to_pipeline),
-                recycler,
             )?;
         }
 

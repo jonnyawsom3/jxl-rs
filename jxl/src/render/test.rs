@@ -13,9 +13,7 @@ use super::{
 use crate::api::{Endianness, JxlColorType, JxlDataFormat, JxlOutputBuffer};
 use crate::error::Result;
 use crate::headers::Orientation;
-use crate::image::{
-    DataTypeTag, DecoderBufferPool, Image, ImageDataType, LocalBufferRecycler, Rect,
-};
+use crate::image::{DataTypeTag, Image, ImageDataType, Rect};
 use crate::render::SimpleRenderPipeline;
 use crate::render::buffer_splitter::BufferSplitter;
 use crate::util::ShiftRightCeil;
@@ -103,6 +101,8 @@ fn make_and_run_simple_pipeline_impl<InputT: ImageDataType, OutputT: ImageDataTy
         downsampling_shift,
         LOG_GROUP_SIZE,
         chunk_size,
+        // No need to reuse buffers in tests.
+        Some(0),
     )
     .add_stage_internal(stage);
 
@@ -153,9 +153,6 @@ fn make_and_run_simple_pipeline_impl<InputT: ImageDataType, OutputT: ImageDataTy
 
     let buffer_splitter = BufferSplitter::new(&mut buf_ptrs);
 
-    let pool = DecoderBufferPool::new(None);
-    let mut recycler = LocalBufferRecycler::new(&pool);
-
     for g in 0..num_groups {
         for &c in all_channels.iter() {
             let log_group_size = if uses_channel[c] {
@@ -172,7 +169,6 @@ fn make_and_run_simple_pipeline_impl<InputT: ImageDataType, OutputT: ImageDataTy
                 true,
                 extract_group_rect(&input_images[c], g, log_group_size)?,
                 &buffer_splitter,
-                &mut recycler,
             )?;
         }
     }
