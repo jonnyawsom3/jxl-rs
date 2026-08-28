@@ -219,7 +219,7 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
             })
             .collect(),
     };
-    decoder_with_image_info.set_pixel_format(new_format)?;
+    decoder_with_image_info.set_pixel_format(new_format);
 
     // If linear output is requested, initialize the CMS transformer
     let mut output_profile = decoder_with_image_info.output_color_profile().clone();
@@ -271,13 +271,13 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
             image_size.1,
         );
 
-        let mut outputs = vec![OwnedRawImage::new(
-            (byte_size.0 * samples_per_pixel, byte_size.1),
-            false,
-        )?];
+        let mut outputs = vec![OwnedRawImage::new((
+            byte_size.0 * samples_per_pixel,
+            byte_size.1,
+        ))?];
 
         for _ in 0..extra_channels {
-            outputs.push(OwnedRawImage::new(byte_size, false)?);
+            outputs.push(OwnedRawImage::new(byte_size)?);
         }
 
         let mut partial_renders: Vec<Vec<OwnedRawImage>> = vec![];
