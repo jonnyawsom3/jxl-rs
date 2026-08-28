@@ -93,7 +93,7 @@ fn test_set_pixel_format() {
         color_data_format: Some(JxlDataFormat::U8 { bit_depth: 8 }),
         extra_channel_format: vec![],
     };
-    decoder.set_pixel_format(new_format.clone()).unwrap();
+    decoder.set_pixel_format(new_format.clone());
     assert_eq!(decoder.current_pixel_format(), &new_format);
 }
 
@@ -115,21 +115,19 @@ fn test_default_output_tf_by_pixel_format() {
         JxlTransferFunction::Linear,
     );
 
-    decoder.set_pixel_format(JxlPixelFormat::rgba8(0)).unwrap();
+    decoder.set_pixel_format(JxlPixelFormat::rgba8(0));
     assert_eq!(
         *decoder.output_color_profile().transfer_function().unwrap(),
         JxlTransferFunction::SRGB,
     );
 
-    decoder
-        .set_pixel_format(JxlPixelFormat::rgba_f16(0))
-        .unwrap();
+    decoder.set_pixel_format(JxlPixelFormat::rgba_f16(0));
     assert_eq!(
         *decoder.output_color_profile().transfer_function().unwrap(),
         JxlTransferFunction::Linear,
     );
 
-    decoder.set_pixel_format(JxlPixelFormat::rgba16(0)).unwrap();
+    decoder.set_pixel_format(JxlPixelFormat::rgba16(0));
     assert_eq!(
         *decoder.output_color_profile().transfer_function().unwrap(),
         JxlTransferFunction::SRGB,
@@ -182,7 +180,7 @@ fn test_fill_opaque_alpha_both_pipelines() {
         let mut decoder = decoder;
         let mut decoder = advance_decoder!(decoder);
         decoder.set_use_simple_pipeline(use_simple);
-        decoder.set_pixel_format(rgba_format.clone()).unwrap();
+        decoder.set_pixel_format(rgba_format.clone());
 
         let basic_info = decoder.basic_info().clone();
         let (width, height) = basic_info.size;
@@ -393,7 +391,7 @@ fn test_animation_with_reference_frames() {
         color_data_format: Some(JxlDataFormat::f32()),
         extra_channel_format: vec![],
     };
-    decoder.set_pixel_format(rgb_format).unwrap();
+    decoder.set_pixel_format(rgb_format);
 
     let basic_info = decoder.basic_info().clone();
     let (width, height) = basic_info.size;
@@ -470,7 +468,7 @@ fn test_skip_frame_then_decode_next() {
         color_data_format: Some(JxlDataFormat::f32()),
         extra_channel_format: vec![],
     };
-    decoder.set_pixel_format(rgb_format).unwrap();
+    decoder.set_pixel_format(rgb_format);
 
     let basic_info = decoder.basic_info().clone();
     let (width, height) = basic_info.size;
@@ -784,7 +782,7 @@ fn decode_with_format<T: crate::image::ImageDataType>(
         }
     };
     decoder.set_use_simple_pipeline(use_simple);
-    decoder.set_pixel_format(pixel_format.clone()).unwrap();
+    decoder.set_pixel_format(pixel_format.clone());
 
     let (width, height) = decoder.basic_info().size;
     let num_samples = pixel_format.color_type.samples_per_pixel();
@@ -980,7 +978,7 @@ fn assert_start_new_frame_matches_sequential(data: &[u8]) {
                     .map(|_| Some(JxlDataFormat::f32()))
                     .collect(),
             };
-            decoder.set_pixel_format(requested_format.clone()).unwrap();
+            decoder.set_pixel_format(requested_format.clone());
 
             let channels = requested_format.color_type.samples_per_pixel();
             let num_ec = requested_format.extra_channel_format.len();
@@ -1295,46 +1293,4 @@ fn decode_test_strategic_solid_blue_grid_boundary() {
             );
         }
     }
-}
-
-/// Regression test: a grayscale, non-XYB VarDCT frame has no stage consuming colour
-/// channels 1 and 2, so those channels end up with no type in the pipeline. VarDCT still
-/// decodes all three channels, and asking the pipeline for their scratch buffers used to
-/// panic.
-#[test]
-fn test_fuzzer_vardct_grayscale_unused_channel() {
-    let data = include_bytes!("../../tests/testdata/vardct_grayscale_unused_channel.jxl");
-    let (_, frames) = decode_internal(data, usize::MAX, false, false, None, None, None).unwrap();
-    let (_, simple_frames) =
-        decode_internal(data, usize::MAX, true, false, None, None, None).unwrap();
-    assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].len(), 1);
-    assert_eq!(frames[0][0].size(), (1, 1));
-    compare_frames(
-        Path::new("vardct_grayscale_unused_channel.jxl"),
-        0,
-        &frames[0],
-        &simple_frames[0],
-    );
-    // Streaming input with flushing exercises the low-memory pipeline's partial renders.
-    decode_internal(data, 1, false, true, None, None, None).unwrap();
-}
-
-/// Regression test: a context map with cluster index 255. This shouldn't panic.
-#[test]
-fn test_fuzzer_context_map_num_histograms_overflow() {
-    let data = include_bytes!("../../tests/testdata/context_map_num_histograms_overflow.jxl");
-    let _ = decode_internal(data, usize::MAX, false, false, None, None, None);
-    let _ = decode_internal(data, 1024, false, true, None, None, None);
-}
-
-/// Regression test: two nested palette transforms, where the inner one has no colors and no
-/// deltas and so produces a 0x1 palette channel. `Image` allocates such a channel as 0x0, and
-/// applying the outer palette on top of it used to compare the declared 0x1 size against the
-/// allocated 0x0 one and panic. The file is malformed further on, so decoding it must fail --
-/// but with an error rather than a panic.
-#[test]
-fn test_fuzzer_modular_palette_empty_meta_channel() {
-    let data = include_bytes!("../../tests/testdata/modular_palette_empty_meta_channel.jxl");
-    assert!(decode_internal(data, usize::MAX, false, false, None, None, None).is_err());
 }

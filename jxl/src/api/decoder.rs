@@ -154,12 +154,8 @@ impl JxlDecoder<WithImageInfo> {
     ///
     /// Setting this may also change output color profile in some cases, if the profile was not set
     /// manually before.
-    ///
-    /// The pixel format can only be changed before the first frame header is
-    /// decoded, i.e. right after basic info becomes available; afterwards
-    /// this returns an error (except when the format does not change).
-    pub fn set_pixel_format(&mut self, pixel_format: JxlPixelFormat) -> Result<()> {
-        self.inner.set_pixel_format(pixel_format)
+    pub fn set_pixel_format(&mut self, pixel_format: JxlPixelFormat) {
+        self.inner.set_pixel_format(pixel_format);
     }
 
     pub fn process(
