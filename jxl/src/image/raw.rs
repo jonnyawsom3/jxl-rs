@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use super::Rect;
-use super::internal::{BufferInitialization, RawImageBuffer};
+use super::internal::RawImageBuffer;
 use crate::error::Result;
 
 pub struct OwnedRawImage {
@@ -19,32 +19,13 @@ pub struct OwnedRawImage {
 }
 
 impl OwnedRawImage {
-    pub fn new(byte_size: (usize, usize), require_zero: bool) -> Result<Self> {
-        let init = if require_zero {
-            BufferInitialization::Zeroed
-        } else {
-            BufferInitialization::Undefined
-        };
+    pub fn new(byte_size: (usize, usize)) -> Result<Self> {
         Ok(Self {
             // Safety note: the returned memory is initialized and part of a single allocation of
             // the correct length.
-            // SAFETY: init is either Zeroed or Undefined (not CopyFrom).
-            data: unsafe { RawImageBuffer::try_allocate(byte_size, init)? },
+            // SAFETY: `copy_from` is `None`.
+            data: unsafe { RawImageBuffer::try_allocate(byte_size, None)? },
         })
-    }
-
-    pub fn new_zeroed(byte_size: (usize, usize)) -> Result<Self> {
-        Self::new(byte_size, true)
-    }
-
-    pub(super) fn into_raw_parts(mut self) -> (*mut u8, usize) {
-        let (buf, capacity) = self.data.take_raw_parts();
-        std::mem::forget(self);
-        (buf, capacity)
-    }
-
-    pub(super) fn from_raw_buffer(data: RawImageBuffer) -> Self {
-        Self { data }
     }
 
     pub fn get_rect_mut(&mut self, rect: Rect) -> RawImageRectMut<'_> {

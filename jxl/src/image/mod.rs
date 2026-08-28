@@ -10,7 +10,6 @@ mod internal;
 mod output_buffer;
 mod raw;
 mod rect;
-mod recycler;
 #[cfg(test)]
 mod test;
 mod typed;
@@ -19,5 +18,4 @@ pub use data_type::{DataTypeTag, ImageDataType};
 pub use output_buffer::JxlOutputBuffer;
 pub use raw::{OwnedRawImage, RawImageRect, RawImageRectMut};
 pub use rect::Rect;
-pub use recycler::{DecoderBufferPool, LocalBufferRecycler};
 pub use typed::{Image, ImageRect, ImageRectMut};
