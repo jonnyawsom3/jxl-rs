@@ -24,7 +24,7 @@ use crate::headers::extra_channels::ExtraChannelInfo;
 use crate::headers::frame_header::{Encoding, FrameHeader, FrameType};
 use crate::headers::permutation::Permutation;
 use crate::headers::toc::Toc;
-use crate::image::{Image, Rect};
+use crate::image::{BufferRecycler, Image, Rect};
 use crate::render::buffer_splitter::{OutputChannelRef, OutputChannelSplitter};
 use crate::util::PerThreadStorage;
 use crate::util::sync::{Arc, Mutex, RwLock};
@@ -310,6 +310,9 @@ pub struct Frame {
     // LF groups that received data and thus should trigger a modular
     // re-render of the corresponding groups.
     dirty_lf_groups: BTreeSet<usize>,
+    buffer_recycler: Arc<BufferRecycler>,
+    // LF groups that received data or have modified neighbors and need to be previewed.
+    lf_preview_dirty_groups: BTreeSet<usize>,
 }
 
 impl Frame {

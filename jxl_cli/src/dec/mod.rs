@@ -10,19 +10,25 @@ use std::time::{Duration, Instant};
 use color_eyre::eyre::{Result, eyre};
 use jxl::api::states::WithImageInfo;
 use jxl::api::{
-    Endianness, JxlAnimation, JxlBitDepth, JxlBitstreamInput, JxlColorProfile, JxlColorType,
-    JxlDataFormat, JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, JxlParallelRunner,
+    Endianness, JxlAnimation, JxlBitDepth, JxlBitstreamInput, JxlColorEncoding, JxlColorProfile,
+    JxlColorType, JxlDataFormat, JxlDecoder, JxlDecoderOptions, JxlOutputBuffer, JxlParallelRunner,
     JxlParallelRunnerFun, JxlPixelFormat, ProcessingResult,
 };
 use jxl::headers::extra_channels::ExtraChannel;
 use jxl::image::{OwnedRawImage, Rect};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
+pub struct PartialRender {
+    pub byte_index: usize,
+    pub channels: Vec<OwnedRawImage>,
+}
+
 pub struct ImageFrame {
-    pub partial_renders: Vec<Vec<OwnedRawImage>>,
+    pub partial_renders: Vec<PartialRender>,
     pub channels: Vec<OwnedRawImage>,
     pub duration: f64,
     pub color_type: JxlColorType,
+    pub total_bytes: usize,
 }
 
 pub struct DecodeOutput {
@@ -155,12 +161,14 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
     requested_bit_depth: Option<usize>,
     requested_output_type: Option<OutputDataType>,
     accepted_output_types: &[OutputDataType],
+    accepts_cmyk: bool,
     interleave_alpha: bool,
     linear_output: bool,
     render_interval: Option<usize>,
     allow_partial_files: bool,
 ) -> Result<(DecodeOutput, Duration)> {
     let start = Instant::now();
+    let total_bytes = input.available_bytes()?;
 
     let mut decoder_with_image_info = decode_header(input, render_interval, decoder_options)?;
 
@@ -219,12 +227,22 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
     };
     decoder_with_image_info.set_pixel_format(new_format)?;
 
-    // If linear output is requested, initialize the CMS transformer
+    // If linear output is requested, or CMYK output is not supported, initialize the CMS transformer
     let mut output_profile = decoder_with_image_info.output_color_profile().clone();
     let mut cms_transformer = None;
-    if linear_output && let JxlColorProfile::Simple(ref enc) = output_profile {
-        let linear_enc = enc.with_linear_tf();
-        let target_profile = JxlColorProfile::Simple(linear_enc.clone());
+    let target_enc = if linear_output && let JxlColorProfile::Simple(ref enc) = output_profile {
+        Some(enc.with_linear_tf())
+    } else if !accepts_cmyk && output_profile.is_cmyk() {
+        if linear_output {
+            Some(JxlColorEncoding::linear_srgb(false))
+        } else {
+            Some(JxlColorEncoding::srgb(false))
+        }
+    } else {
+        None
+    };
+    if let Some(enc) = target_enc {
+        let target_profile = JxlColorProfile::Simple(enc);
 
         let cms = jxl_cms::lcms2::Lcms2Cms;
         use jxl_cms::JxlCms;
@@ -278,9 +296,7 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
             outputs.push(OwnedRawImage::new(byte_size)?);
         }
 
-        let mut partial_renders: Vec<Vec<OwnedRawImage>> = vec![];
-
-        let mut has_rendered_data = false;
+        let mut partial_renders: Vec<PartialRender> = vec![];
 
         let mut decoder_with_frame_info = 'partial: loop {
             match input.with_capped_size(render_interval, |inp| {
@@ -304,15 +320,16 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                     // If we have more data but we're feeding it slowly, save the partial
                     // render and retry.
                     if render_interval.is_some() && input.available_bytes()? > 0 {
-                        has_rendered_data |= fallback
+                        let changed = fallback
                             .flush_pixels(&mut output_bufs, Some(&mut RayonParallelRunner))?;
-                        if has_rendered_data {
-                            partial_renders.push(
-                                outputs
+                        if changed {
+                            partial_renders.push(PartialRender {
+                                byte_index: total_bytes.saturating_sub(input.available_bytes()?),
+                                channels: outputs
                                     .iter()
                                     .map(|x| x.try_clone())
                                     .collect::<Result<_, _>>()?,
-                            );
+                            });
                         }
                         decoder_with_image_info = fallback;
                         continue 'partial;
@@ -323,6 +340,7 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                             duration: 0.0,
                             channels: outputs,
                             color_type,
+                            total_bytes,
                         });
                         break 'frame;
                     }
@@ -359,15 +377,16 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                     // If we have more data but we're feeding it slowly, save the partial
                     // render and retry.
                     if render_interval.is_some() && input.available_bytes()? > 0 {
-                        has_rendered_data |= fallback
+                        let changed = fallback
                             .flush_pixels(&mut output_bufs, Some(&mut RayonParallelRunner))?;
-                        if has_rendered_data {
-                            partial_renders.push(
-                                outputs
+                        if changed {
+                            partial_renders.push(PartialRender {
+                                byte_index: total_bytes.saturating_sub(input.available_bytes()?),
+                                channels: outputs
                                     .iter()
                                     .map(|x| x.try_clone())
                                     .collect::<Result<_, _>>()?,
-                            );
+                            });
                         }
                         decoder_with_frame_info = fallback;
                         continue 'partial;
@@ -378,6 +397,7 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                             duration: frame_header.duration.unwrap_or(0.0),
                             channels: outputs,
                             color_type,
+                            total_bytes,
                         });
                         break 'frame;
                     }
@@ -391,6 +411,7 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
             duration: frame_header.duration.unwrap_or(0.0),
             channels: outputs,
             color_type,
+            total_bytes,
         });
 
         if !decoder_with_image_info.has_more_frames() {
@@ -399,9 +420,23 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
     }
 
     if let Some(ref mut transformer) = cms_transformer {
+        let black_channel = info
+            .extra_channels
+            .iter()
+            .enumerate()
+            .find(|x| x.1.ec_type == ExtraChannel::Black)
+            .map(|(x, _)| {
+                if interleave_alpha && main_alpha_channel.is_some_and(|i| i < x) {
+                    x
+                } else {
+                    x + 1 // + 1 as color channels are at index 0 of output buffer
+                }
+            });
         for frame in &mut image_data.frames {
+            let black_image = black_channel.map(|x| frame.channels.remove(x));
             apply_cms(
                 &mut frame.channels[0],
+                black_image.as_ref(),
                 samples_per_pixel,
                 color_channels,
                 output_type,
@@ -410,8 +445,10 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                 info.size.1,
             )?;
             for partial in &mut frame.partial_renders {
+                let black_image = black_channel.map(|x| partial.channels.remove(x));
                 apply_cms(
-                    &mut partial[0],
+                    &mut partial.channels[0],
+                    black_image.as_ref(),
                     samples_per_pixel,
                     color_channels,
                     output_type,
@@ -426,8 +463,10 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
     Ok((image_data, start.elapsed()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_cms(
     image: &mut OwnedRawImage,
+    black_image: Option<&OwnedRawImage>,
     samples_per_pixel: usize,
     color_channels: usize,
     output_type: OutputDataType,
@@ -435,50 +474,119 @@ fn apply_cms(
     width: usize,
     height: usize,
 ) -> Result<()> {
-    let mut row_color_buffer = vec![0.0f32; width * color_channels];
+    let input_channels = color_channels + if black_image.is_some() { 1 } else { 0 };
+    let mut row_color_buffer = vec![0.0f32; width * input_channels];
     let mut row_output_buffer = vec![0.0f32; width * color_channels];
     for y in 0..height {
         let row_bytes = image.row(y);
+        let black_row_bytes = black_image.map(|img| img.row(y));
         // 1. Extract and convert to f32
         match output_type {
             OutputDataType::U8 => {
-                for x in 0..width {
-                    for c in 0..color_channels {
-                        let idx = x * samples_per_pixel + c;
-                        row_color_buffer[x * color_channels + c] = row_bytes[idx] as f32 / 255.0;
+                if let Some(black_bytes) = black_row_bytes {
+                    for x in 0..width {
+                        for c in 0..color_channels {
+                            let idx = x * samples_per_pixel + c;
+                            row_color_buffer[x * input_channels + c] =
+                                row_bytes[idx] as f32 / 255.0;
+                        }
+                        row_color_buffer[x * input_channels + color_channels] =
+                            black_bytes[x] as f32 / 255.0;
+                    }
+                } else {
+                    for x in 0..width {
+                        for c in 0..color_channels {
+                            let idx = x * samples_per_pixel + c;
+                            row_color_buffer[x * color_channels + c] =
+                                row_bytes[idx] as f32 / 255.0;
+                        }
                     }
                 }
             }
             OutputDataType::U16 => {
-                for x in 0..width {
-                    for c in 0..color_channels {
-                        let idx = (x * samples_per_pixel + c) * 2;
-                        let val = u16::from_ne_bytes([row_bytes[idx], row_bytes[idx + 1]]);
-                        row_color_buffer[x * color_channels + c] = val as f32 / 65535.0;
+                if let Some(black_bytes) = black_row_bytes {
+                    for x in 0..width {
+                        for c in 0..color_channels {
+                            let idx = (x * samples_per_pixel + c) * 2;
+                            let val = u16::from_ne_bytes([row_bytes[idx], row_bytes[idx + 1]]);
+                            row_color_buffer[x * input_channels + c] = val as f32 / 65535.0;
+                        }
+                        let k_idx = x * 2;
+                        let k_val =
+                            u16::from_ne_bytes([black_bytes[k_idx], black_bytes[k_idx + 1]]);
+                        row_color_buffer[x * input_channels + color_channels] =
+                            k_val as f32 / 65535.0;
+                    }
+                } else {
+                    for x in 0..width {
+                        for c in 0..color_channels {
+                            let idx = (x * samples_per_pixel + c) * 2;
+                            let val = u16::from_ne_bytes([row_bytes[idx], row_bytes[idx + 1]]);
+                            row_color_buffer[x * color_channels + c] = val as f32 / 65535.0;
+                        }
                     }
                 }
             }
             OutputDataType::F16 => {
-                for x in 0..width {
-                    for c in 0..color_channels {
-                        let idx = (x * samples_per_pixel + c) * 2;
-                        let val = u16::from_ne_bytes([row_bytes[idx], row_bytes[idx + 1]]);
-                        row_color_buffer[x * color_channels + c] =
-                            jxl::util::f16::from_bits(val).to_f32();
+                if let Some(black_bytes) = black_row_bytes {
+                    for x in 0..width {
+                        for c in 0..color_channels {
+                            let idx = (x * samples_per_pixel + c) * 2;
+                            let val = u16::from_ne_bytes([row_bytes[idx], row_bytes[idx + 1]]);
+                            row_color_buffer[x * input_channels + c] =
+                                jxl::util::f16::from_bits(val).to_f32();
+                        }
+                        let k_idx = x * 2;
+                        let k_val =
+                            u16::from_ne_bytes([black_bytes[k_idx], black_bytes[k_idx + 1]]);
+                        row_color_buffer[x * input_channels + color_channels] =
+                            jxl::util::f16::from_bits(k_val).to_f32();
+                    }
+                } else {
+                    for x in 0..width {
+                        for c in 0..color_channels {
+                            let idx = (x * samples_per_pixel + c) * 2;
+                            let val = u16::from_ne_bytes([row_bytes[idx], row_bytes[idx + 1]]);
+                            row_color_buffer[x * color_channels + c] =
+                                jxl::util::f16::from_bits(val).to_f32();
+                        }
                     }
                 }
             }
             OutputDataType::F32 => {
-                for x in 0..width {
-                    for c in 0..color_channels {
-                        let idx = (x * samples_per_pixel + c) * 4;
-                        let val = f32::from_ne_bytes([
-                            row_bytes[idx],
-                            row_bytes[idx + 1],
-                            row_bytes[idx + 2],
-                            row_bytes[idx + 3],
-                        ]);
-                        row_color_buffer[x * color_channels + c] = val;
+                if let Some(black_bytes) = black_row_bytes {
+                    for x in 0..width {
+                        for c in 0..color_channels {
+                            let idx = (x * samples_per_pixel + c) * 4;
+                            let val = f32::from_ne_bytes([
+                                row_bytes[idx],
+                                row_bytes[idx + 1],
+                                row_bytes[idx + 2],
+                                row_bytes[idx + 3],
+                            ]);
+                            row_color_buffer[x * input_channels + c] = val;
+                        }
+                        let k_idx = x * 4;
+                        row_color_buffer[x * input_channels + color_channels] =
+                            f32::from_ne_bytes([
+                                black_bytes[k_idx],
+                                black_bytes[k_idx + 1],
+                                black_bytes[k_idx + 2],
+                                black_bytes[k_idx + 3],
+                            ]);
+                    }
+                } else {
+                    for x in 0..width {
+                        for c in 0..color_channels {
+                            let idx = (x * samples_per_pixel + c) * 4;
+                            let val = f32::from_ne_bytes([
+                                row_bytes[idx],
+                                row_bytes[idx + 1],
+                                row_bytes[idx + 2],
+                                row_bytes[idx + 3],
+                            ]);
+                            row_color_buffer[x * color_channels + c] = val;
+                        }
                     }
                 }
             }

@@ -487,16 +487,41 @@ impl Frame {
         self.reference_frame_data = reference_frame_data;
         self.lf_frame_data = lf_frame_data;
 
-        if self.header.frame_type == FrameType::LFFrame
-            && self.header.lf_level == 1
-            && has_decoded_data
-        {
-            if do_flush && let Some(buffers) = api_buffers {
+        if self.header.frame_type == FrameType::LFFrame && self.header.lf_level == 1 {
+            let (gsx, gsy) = self.header.size_groups();
+            let group_dim = self.header.group_dim();
+            for r in &regions {
+                if r.size.0 == 0 || r.size.1 == 0 {
+                    continue;
+                }
+                let gx0 = r.origin.0 / group_dim;
+                let gx1 = (r.end().0 - 1) / group_dim;
+                let gy0 = r.origin.1 / group_dim;
+                let gy1 = (r.end().1 - 1) / group_dim;
+                for gy in gy0..=gy1 {
+                    for gx in gx0..=gx1 {
+                        let gxm = gx.saturating_sub(1);
+                        let gxp = (gx + 1).min(gsx - 1);
+                        let gym = gy.saturating_sub(1);
+                        let gyp = (gy + 1).min(gsy - 1);
+                        for ny in gym..=gyp {
+                            for nx in gxm..=gxp {
+                                self.lf_preview_dirty_groups.insert(ny * gsx + nx);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if do_flush
+                && let Some(buffers) = api_buffers
+                && has_decoded_data
+            {
                 return self.maybe_preview_lf_frame(
                     pixel_format,
                     buffers,
-                    &regions[..],
                     output_profile,
+                    parallel_runner,
                 );
             } else if self.group_status.incomplete_groups == 0 {
                 // If we are not requesting another flush at the end of the LF frame, we
@@ -521,6 +546,7 @@ impl Frame {
         epf_sigma: Arc<RwLock<SigmaSource>>,
         pixel_format: &JxlPixelFormat,
         output_profile: &JxlColorProfile,
+        buffer_recycler: Arc<crate::image::BufferRecycler>,
     ) -> Result<Box<T>> {
         let num_channels = frame_header.num_extra_channels as usize + 3;
         let num_temp_channels = if frame_header.has_noise() { 3 } else { 0 };
@@ -530,12 +556,7 @@ impl Frame {
             frame_header.size_upsampled(),
             frame_header.upsampling.ilog2() as usize,
             frame_header.log_group_dim(),
-            // TODO(veluca): we should instead have modular mode participate in buffer reuse.
-            if frame_header.encoding == Encoding::Modular {
-                Some(0)
-            } else {
-                None
-            },
+            buffer_recycler,
         );
 
         if frame_header.encoding == Encoding::Modular {
@@ -936,6 +957,7 @@ impl Frame {
                 self.epf_sigma.clone(),
                 pixel_format,
                 output_profile,
+                self.buffer_recycler.clone(),
             )? as Box<dyn std::any::Any + Send + Sync>
         } else {
             Self::build_render_pipeline::<LowMemoryRenderPipeline>(
@@ -949,6 +971,7 @@ impl Frame {
                 self.epf_sigma.clone(),
                 pixel_format,
                 output_profile,
+                self.buffer_recycler.clone(),
             )? as Box<dyn std::any::Any + Send + Sync>
         };
         #[cfg(not(test))]
@@ -963,6 +986,7 @@ impl Frame {
             self.epf_sigma.clone(),
             pixel_format,
             output_profile,
+            self.buffer_recycler.clone(),
         )?;
         self.render_pipeline = Some(render_pipeline);
         self.section0_render_up_to_date = false;
