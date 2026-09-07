@@ -8,14 +8,17 @@ use std::fmt::Debug;
 use super::{RctOp, RctPermutation};
 use crate::error::Result;
 use crate::frame::modular::buffers::{ModularChannel, with_buffers};
+use crate::frame::modular::transforms::palette::PaletteStep;
 use crate::frame::modular::transforms::smooth_squeeze::smooth_upsample;
 use crate::frame::modular::{
-    DataStatus, FullModularImage, ModularBufferInfo, ModularGridKind, Predictor,
-    TransformScratchSpace,
+    DataStatus, FullModularImage, ModularBufferInfo, ModularGridKind, ModularStorage, Predictor,
+    ScratchSpace,
 };
 use crate::headers::frame_header::FrameHeader;
 use crate::headers::modular::WeightedHeader;
-use crate::image::{BufferRecycler, Image, ImageRect, Rect};
+use crate::image::{
+    BufferRecycler, Image, ImageDataType, ImageRect, OwnedRawImage, RawImageRect, Rect,
+};
 use crate::util::SmallVec;
 use crate::util::sync::RwLockReadGuard;
 use crate::util::sync::atomic::{AtomicUsize, Ordering};
@@ -40,7 +43,6 @@ pub enum TransformStep {
         buf_in: usize,
         buf_pal: usize,
         buf_out: Vec<usize>,
-        num_colors: usize,
         num_deltas: usize,
         predictor: Predictor,
         wp_header: WeightedHeader,
@@ -173,14 +175,14 @@ fn borrow_channel(
 fn borrow_topbottom(
     buffers: &[ModularBufferInfo],
     x: (usize, usize),
-) -> RwLockReadGuard<'_, Option<Image<i32>>> {
+) -> RwLockReadGuard<'_, Option<OwnedRawImage>> {
     buffers[x.0].buffer_grid[x.1].topbottom.try_read().unwrap()
 }
 
 fn borrow_leftright(
     buffers: &[ModularBufferInfo],
     x: (usize, usize),
-) -> RwLockReadGuard<'_, Option<Image<i32>>> {
+) -> RwLockReadGuard<'_, Option<OwnedRawImage>> {
     buffers[x.0].buffer_grid[x.1].leftright.try_read().unwrap()
 }
 
@@ -356,41 +358,59 @@ impl SqueezeInfo {
 struct SqueezeInputs<'a> {
     in_avg: RwLockReadGuard<'a, Option<ModularChannel>>,
     in_res: RwLockReadGuard<'a, Option<ModularChannel>>,
-    in_next_border: Option<RwLockReadGuard<'a, Option<Image<i32>>>>,
-    out_prev_border: Option<RwLockReadGuard<'a, Option<Image<i32>>>>,
+    in_next_border: Option<RwLockReadGuard<'a, Option<OwnedRawImage>>>,
+    out_prev_border: Option<RwLockReadGuard<'a, Option<OwnedRawImage>>>,
 }
 
 impl<'a> SqueezeInputs<'a> {
-    fn in_avg_rect(&self, rect: Rect) -> ImageRect<'_, i32> {
-        self.in_avg.as_ref().unwrap().data.get_rect(rect)
+    fn in_avg_rect(&self, rect: Rect, storage: ModularStorage) -> RawImageRect<'_> {
+        self.in_avg
+            .as_ref()
+            .unwrap()
+            .data
+            .as_rect()
+            .rect(rect.to_byte_rect_sz(storage.sample_size()))
     }
 
-    fn in_res_rect(&self, rect: Rect) -> ImageRect<'_, i32> {
-        self.in_res.as_ref().unwrap().data.get_rect(rect)
+    fn in_res_rect(&self, rect: Rect, storage: ModularStorage) -> RawImageRect<'_> {
+        self.in_res
+            .as_ref()
+            .unwrap()
+            .data
+            .as_rect()
+            .rect(rect.to_byte_rect_sz(storage.sample_size()))
     }
 
-    fn in_next_border(&self) -> Option<&Image<i32>> {
-        self.in_next_border.as_ref().and_then(|g| g.as_ref())
+    fn in_next_border(&self) -> Option<RawImageRect<'_>> {
+        self.in_next_border
+            .as_ref()
+            .and_then(|g| g.as_ref())
+            .map(|img| img.as_rect())
     }
 
-    fn out_prev_border(&self) -> Option<&Image<i32>> {
-        self.out_prev_border.as_ref().and_then(|g| g.as_ref())
+    fn out_prev_border(&self) -> Option<RawImageRect<'_>> {
+        self.out_prev_border
+            .as_ref()
+            .and_then(|g| g.as_ref())
+            .map(|img| img.as_rect())
     }
 }
 
 enum TileGuard<'a> {
     Channel(RwLockReadGuard<'a, Option<ModularChannel>>),
-    Border(RwLockReadGuard<'a, Option<Image<i32>>>),
+    Border(RwLockReadGuard<'a, Option<OwnedRawImage>>),
 }
 
-impl<'a> std::ops::Deref for TileGuard<'a> {
-    type Target = Image<i32>;
-
-    fn deref(&self) -> &Self::Target {
+impl<'a> TileGuard<'a> {
+    fn as_rect<T: ImageDataType>(&self) -> ImageRect<'_, T> {
         match self {
-            TileGuard::Channel(g) => &g.as_ref().unwrap().data,
-            TileGuard::Border(g) => g.as_ref().unwrap(),
+            TileGuard::Channel(g) => ImageRect::<T>::from_raw(g.as_ref().unwrap().data.as_rect()),
+            TileGuard::Border(g) => ImageRect::<T>::from_raw(g.as_ref().unwrap().as_rect()),
         }
+    }
+
+    fn row<T: ImageDataType>(&self, row: usize) -> &[T] {
+        self.as_rect::<T>().row(row)
     }
 }
 
@@ -416,7 +436,7 @@ impl<'a> TiledChannelView<'a> {
         if ly == 0 { 0 } else { 1 }
     }
 
-    fn copy_tile_slice(
+    fn copy_tile_slice<T: Into<i32> + ImageDataType>(
         &self,
         (dx, dy): (usize, usize),
         ly: usize,
@@ -425,30 +445,25 @@ impl<'a> TiledChannelView<'a> {
         top_tile_h: usize,
         dest: &mut [i32],
     ) {
-        let img = self.tiles[dy * 3 + dx].as_deref().unwrap();
-        match (dy, dx) {
-            (1, 1) => {
-                dest.copy_from_slice(&img.row(ly)[src_range]);
-            }
-            (0, _) => {
-                dest.copy_from_slice(&img.row(Self::top_border_row(ly, top_tile_h))[src_range]);
-            }
-            (2, _) => {
-                dest.copy_from_slice(&img.row(Self::bottom_border_row(ly))[src_range]);
-            }
+        let img = self.tiles[dy * 3 + dx].as_ref().unwrap();
+        let src = match (dy, dx) {
+            (1, 1) => &img.row::<T>(ly)[src_range],
+            (0, _) => &img.row::<T>(Self::top_border_row(ly, top_tile_h))[src_range],
+            (2, _) => &img.row::<T>(Self::bottom_border_row(ly))[src_range],
             (1, 0) => {
                 let offset_start = 4 - (tile_w - src_range.start);
                 let offset_end = 4 - (tile_w - src_range.end);
-                dest.copy_from_slice(&img.row(ly)[offset_start..offset_end]);
+                &img.row::<T>(ly)[offset_start..offset_end]
             }
-            (1, 2) => {
-                dest.copy_from_slice(&img.row(ly)[src_range]);
-            }
+            (1, 2) => &img.row::<T>(ly)[src_range],
             _ => unreachable!(),
+        };
+        for (d, &s) in dest.iter_mut().zip(src) {
+            *d = s.into();
         }
     }
 
-    pub fn load_row_to_scratch(
+    pub fn load_row_to_scratch<T: Into<i32> + ImageDataType>(
         &self,
         yg: isize,
         xoff: usize,
@@ -474,7 +489,7 @@ impl<'a> TiledChannelView<'a> {
         };
 
         let Some(grid_dim) = self.grid_dim else {
-            let row = self.tiles[4].as_deref().unwrap().row(clamped_y);
+            let row = self.tiles[4].as_ref().unwrap().row::<T>(clamped_y);
 
             let left_clamp = (2 - xoff as isize).max(0) as usize;
             let right_clamp_start = (w as isize + 2 - xoff as isize).min(max_len as isize) as usize;
@@ -482,16 +497,20 @@ impl<'a> TiledChannelView<'a> {
             if left_clamp < right_clamp_start {
                 let src_start = (xoff as isize + left_clamp as isize - 2) as usize;
                 let len = right_clamp_start - left_clamp;
-                row_buf[left_clamp..right_clamp_start]
-                    .copy_from_slice(&row[src_start..src_start + len]);
+                for (d, &s) in row_buf[left_clamp..right_clamp_start]
+                    .iter_mut()
+                    .zip(&row[src_start..src_start + len])
+                {
+                    *d = s.into();
+                }
             }
 
             if left_clamp > 0 {
-                row_buf[..left_clamp].fill(row[0]);
+                row_buf[..left_clamp].fill(row[0].into());
             }
 
             if right_clamp_start < max_len {
-                row_buf[right_clamp_start..max_len].fill(row[w - 1]);
+                row_buf[right_clamp_start..max_len].fill(row[w - 1].into());
             }
 
             let last = row_buf[max_len - 1];
@@ -536,7 +555,7 @@ impl<'a> TiledChannelView<'a> {
                     let dest_end = dest_start + (intersect_end - intersect_start);
                     let src_start = intersect_start - tile_x_start;
                     let src_end = intersect_end - tile_x_start;
-                    self.copy_tile_slice(
+                    self.copy_tile_slice::<T>(
                         (dx, dy),
                         ly,
                         src_start..src_end,
@@ -550,18 +569,18 @@ impl<'a> TiledChannelView<'a> {
 
         if left_clamp > 0 {
             let left_val = match dy {
-                1 => self.tiles[4].as_deref().unwrap().row(ly)[0],
+                1 => self.tiles[4].as_ref().unwrap().row::<T>(ly)[0],
                 0 => self.tiles[1]
-                    .as_deref()
+                    .as_ref()
                     .unwrap()
-                    .row(Self::top_border_row(ly, top_tile_h))[0],
+                    .row::<T>(Self::top_border_row(ly, top_tile_h))[0],
                 2 => self.tiles[7]
-                    .as_deref()
+                    .as_ref()
                     .unwrap()
-                    .row(Self::bottom_border_row(ly))[0],
-                _ => 0,
+                    .row::<T>(Self::bottom_border_row(ly))[0],
+                _ => T::default(),
             };
-            row_buf[..left_clamp].fill(left_val);
+            row_buf[..left_clamp].fill(left_val.into());
         }
 
         if right_clamp > 0 {
@@ -569,19 +588,19 @@ impl<'a> TiledChannelView<'a> {
             let lx_right = (w - 1) % grid_w;
             let dx = (gx_right as isize - gx_center as isize + 1) as usize;
             let right_val = match (dy, dx) {
-                (1, 1) => self.tiles[4].as_deref().unwrap().row(ly)[lx_right],
-                (1, 2) => self.tiles[5].as_deref().unwrap().row(ly)[3],
+                (1, 1) => self.tiles[4].as_ref().unwrap().row::<T>(ly)[lx_right],
+                (1, 2) => self.tiles[5].as_ref().unwrap().row::<T>(ly)[3],
                 (0, 1 | 2) => self.tiles[dx]
-                    .as_deref()
+                    .as_ref()
                     .unwrap()
-                    .row(Self::top_border_row(ly, top_tile_h))[lx_right],
+                    .row::<T>(Self::top_border_row(ly, top_tile_h))[lx_right],
                 (2, 1 | 2) => self.tiles[6 + dx]
-                    .as_deref()
+                    .as_ref()
                     .unwrap()
-                    .row(Self::bottom_border_row(ly))[lx_right],
-                _ => 0,
+                    .row::<T>(Self::bottom_border_row(ly))[lx_right],
+                _ => T::default(),
             };
-            row_buf[max_len - right_clamp..max_len].fill(right_val);
+            row_buf[max_len - right_clamp..max_len].fill(right_val.into());
         }
 
         let last = row_buf[max_len - 1];
@@ -640,9 +659,9 @@ impl TransformStepChunk {
         &self,
         frame_header: &FrameHeader,
         buffers: &[ModularBufferInfo],
-        transform_scratch_space: &mut TransformScratchSpace,
+        scratch_space: &mut ScratchSpace,
         recycler: &BufferRecycler,
-        pass_to_pipeline: &dyn Fn(usize, usize, bool, Image<i32>) -> Result<()>,
+        pass_to_pipeline: &dyn Fn(usize, usize, bool, OwnedRawImage) -> Result<()>,
     ) -> Result<()> {
         let is_final = self.missing_final_deps == 0;
         let buf_out = self.buf_out();
@@ -685,14 +704,18 @@ impl TransformStepChunk {
                     let b_in = &buffers[buf_in[i]].buffer_grid[out_grid];
                     let b_out = &buffers[buf_out[i]].buffer_grid[out_grid];
                     if b_in.data_status == DataStatus::Zero && !b_in.has_buffer() {
-                        b_out.ensure_buffer(&buffers[buf_out[i]].info, recycler)?;
+                        b_out.ensure_buffer(
+                            &buffers[buf_out[i]].info,
+                            buffers[buf_out[i]].storage,
+                            recycler,
+                        )?;
                     } else {
                         *b_out.data.try_write().unwrap() =
                             Some(b_in.get_buffer(b_in.can_consume(is_final), recycler)?);
                     }
                 }
                 with_buffers(buffers, buf_out, out_grid, recycler, |mut bufs| {
-                    super::rct::do_rct_step(&mut bufs, *op, *perm);
+                    super::rct::do_rct_step(&mut bufs, buffers[buf_in[0]].storage, *op, *perm);
                     Ok(())
                 })?;
             }
@@ -700,93 +723,6 @@ impl TransformStepChunk {
                 buf_in,
                 buf_pal,
                 buf_out,
-                num_colors,
-                num_deltas,
-                predictor,
-                ..
-            } if !predictor.requires_full_row() => {
-                assert_eq!(out_grid_kind, buffers[*buf_in].grid_kind);
-                assert_eq!(out_size, buffers[*buf_in].info.size);
-
-                with_buffers(buffers, buf_out, out_grid, recycler, |_| Ok(()))?;
-                if out_size.0 != 0 {
-                    let img_pal = borrow_channel(buffers, (*buf_pal, 0));
-                    let grid_shape = buffers[buf_out[0]].grid_shape;
-                    let grid_x = out_grid % grid_shape.0;
-                    let grid_y = out_grid / grid_shape.0;
-                    let has_left = *predictor != Predictor::Zero && grid_x > 0;
-                    let has_top = *predictor != Predictor::Zero && grid_y > 0;
-                    let borrow_border_guards = |grid_idx: usize, is_lr: bool| {
-                        buf_out
-                            .iter()
-                            .map(|i| {
-                                if is_lr {
-                                    borrow_leftright(buffers, (*i, grid_idx))
-                                } else {
-                                    borrow_topbottom(buffers, (*i, grid_idx))
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                    };
-                    let stride = grid_shape.0;
-                    let left_guards = has_left
-                        .then(|| borrow_border_guards(grid_y * stride + (grid_x - 1), true));
-                    let top_guards = has_top
-                        .then(|| borrow_border_guards((grid_y - 1) * stride + grid_x, false));
-                    let topleft_guards = (has_left && has_top)
-                        .then(|| borrow_border_guards((grid_y - 1) * stride + (grid_x - 1), false));
-                    let left_refs = left_guards
-                        .as_ref()
-                        .map(|v| v.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>());
-                    let top_refs = top_guards
-                        .as_ref()
-                        .map(|v| v.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>());
-                    let topleft_refs = topleft_guards
-                        .as_ref()
-                        .map(|v| v.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>());
-
-                    let mut guards = vec![];
-                    for i in buf_out {
-                        let b = &buffers[*i].buffer_grid[out_grid];
-                        guards.push(b.data.try_write().unwrap());
-                    }
-                    let mut out_buf_refs: Vec<&mut ModularChannel> =
-                        guards.iter_mut().map(|g| g.as_mut().unwrap()).collect();
-                    if matches!(predictor, Predictor::Zero)
-                        && buffers[*buf_in].buffer_grid[out_grid].data_status == DataStatus::Zero
-                    {
-                        super::palette::zero_palette_step_one_group(
-                            img_pal.as_ref().unwrap(),
-                            &mut out_buf_refs,
-                            *num_colors,
-                            *num_deltas,
-                        );
-                    } else {
-                        let img_in = borrow_channel(buffers, (*buf_in, out_grid));
-                        super::palette::do_palette_step_one_group(
-                            img_in.as_ref().unwrap(),
-                            img_pal.as_ref().unwrap(),
-                            &mut out_buf_refs,
-                            left_refs.as_deref(),
-                            top_refs.as_deref(),
-                            topleft_refs.as_deref(),
-                            *num_colors,
-                            *num_deltas,
-                            *predictor,
-                            &mut transform_scratch_space.palette_row_scratch,
-                        );
-                    }
-                }
-                let buf_in_grid = &buffers[*buf_in].buffer_grid[out_grid];
-                let buf_pal_grid = &buffers[*buf_pal].buffer_grid[0];
-                buf_in_grid.mark_used(buf_in_grid.can_consume(is_final), recycler);
-                buf_pal_grid.mark_used(buf_pal_grid.can_consume(is_final), recycler);
-            }
-            TransformStep::Palette {
-                buf_in,
-                buf_pal,
-                buf_out,
-                num_colors,
                 num_deltas,
                 predictor,
                 wp_header,
@@ -794,35 +730,65 @@ impl TransformStepChunk {
                 assert_eq!(out_grid_kind, buffers[*buf_in].grid_kind);
                 assert_eq!(out_size, buffers[*buf_in].info.size);
                 let grid_shape = buffers[buf_out[0]].grid_shape;
-                assert_eq!(out_grid % grid_shape.0, 0);
-                let grid_y = out_grid / grid_shape.0;
-                for grid_x in 0..grid_shape.0 {
-                    // Ensure that the output buffers are present.
-                    // TODO(szabadka): Extend the callback to support many grid points.
-                    with_buffers(buffers, buf_out, out_grid + grid_x, recycler, |_| Ok(()))?;
+                let stride = grid_shape.0;
+                let requires_full_row = predictor.requires_full_row();
+                let grid_xsize = if requires_full_row {
+                    assert_eq!(out_grid % stride, 0);
+                    stride
+                } else {
+                    1
+                };
+                let grid_x = out_grid % stride;
+                let grid_y = out_grid / stride;
+
+                for gx in 0..grid_xsize {
+                    with_buffers(buffers, buf_out, out_grid + gx, recycler, |_| Ok(()))?;
                 }
+
                 if out_size.0 != 0 {
-                    let mut in_bufs = vec![];
-                    for grid_x in 0..grid_shape.0 {
-                        let grid = grid_y * grid_shape.0 + grid_x;
-                        in_bufs.push(borrow_channel(buffers, (*buf_in, grid)));
-                    }
-                    let in_buf_refs: Vec<&ModularChannel> =
-                        in_bufs.iter().map(|x| x.as_ref().unwrap()).collect();
                     let img_pal = borrow_channel(buffers, (*buf_pal, 0));
-                    // The previous row of output grids is only read as prediction
-                    // context, so take read locks on it: other transforms (e.g.
-                    // Output) may read it concurrently.
-                    let mut prev_guards = vec![];
+
+                    let has_left =
+                        !requires_full_row && *predictor != Predictor::Zero && grid_x > 0;
+                    let has_top = *predictor != Predictor::Zero && grid_y > 0;
+                    let has_topleft = has_left && has_top;
+
+                    let left_guards = has_left.then(|| {
+                        buf_out
+                            .iter()
+                            .map(|i| {
+                                borrow_leftright(buffers, (*i, grid_y * stride + (grid_x - 1)))
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    let topleft_guards = has_topleft.then(|| {
+                        buf_out
+                            .iter()
+                            .map(|i| {
+                                borrow_topbottom(
+                                    buffers,
+                                    (*i, (grid_y - 1) * stride + (grid_x - 1)),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    let left_refs: Option<Vec<&OwnedRawImage>> = left_guards
+                        .as_ref()
+                        .map(|v| v.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>());
+                    let topleft_refs: Option<Vec<&OwnedRawImage>> = topleft_guards
+                        .as_ref()
+                        .map(|v| v.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>());
+
+                    let mut top_guards = vec![];
                     let mut prev_aux_guards = vec![];
-                    if grid_y > 0 {
+                    if has_top {
                         for i in buf_out {
-                            for grid_x in 0..grid_shape.0 {
-                                let grid = (grid_y - 1) * grid_shape.0 + grid_x;
-                                prev_guards.push(borrow_topbottom(buffers, (*i, grid)));
+                            for gx in 0..grid_xsize {
+                                let grid = (grid_y - 1) * stride + grid_x + gx;
+                                top_guards.push(borrow_topbottom(buffers, (*i, grid)));
                             }
                             if *predictor == Predictor::Weighted {
-                                let grid = (grid_y - 1) * grid_shape.0;
+                                let grid = (grid_y - 1) * stride;
                                 prev_aux_guards.push(
                                     buffers[*i].buffer_grid[grid]
                                         .auxiliary_data
@@ -832,53 +798,75 @@ impl TransformStepChunk {
                             }
                         }
                     }
-                    let prev_refs: Vec<&Image<i32>> =
-                        prev_guards.iter().map(|g| g.as_ref().unwrap()).collect();
+                    let top_refs: Vec<&OwnedRawImage> =
+                        top_guards.iter().map(|g| g.as_ref().unwrap()).collect();
                     let prev_aux_refs: Vec<Option<&Image<i32>>> =
                         prev_aux_guards.iter().map(|g| g.as_ref()).collect();
+
                     let mut guards = vec![];
                     for i in buf_out {
-                        for grid_x in 0..grid_shape.0 {
-                            let grid = grid_y * grid_shape.0 + grid_x;
+                        for gx in 0..grid_xsize {
+                            let grid = out_grid + gx;
                             let b = &buffers[*i].buffer_grid[grid];
                             guards.push(b.data.try_write().unwrap());
                         }
                     }
                     let mut out_buf_refs: Vec<&mut ModularChannel> =
                         guards.iter_mut().map(|g| g.as_mut().unwrap()).collect();
-                    let mut aux_out: Vec<_> = if *predictor == Predictor::Weighted {
-                        buf_out
-                            .iter()
-                            .map(|i| {
-                                buffers[*i].buffer_grid[grid_y * grid_shape.0]
-                                    .auxiliary_data
-                                    .try_write()
-                                    .unwrap()
-                            })
-                            .collect()
+
+                    if matches!(predictor, Predictor::Zero)
+                        && buffers[*buf_in].buffer_grid[out_grid].data_status == DataStatus::Zero
+                    {
+                        super::palette::zero_palette_step_one_group(
+                            img_pal.as_ref().unwrap(),
+                            &mut out_buf_refs,
+                            buffers[*buf_in].storage,
+                        );
                     } else {
-                        vec![]
-                    };
-                    super::palette::do_palette_step_group_row(
-                        &in_buf_refs,
-                        img_pal.as_ref().unwrap(),
-                        &mut out_buf_refs,
-                        (grid_y > 0).then_some(&prev_refs[..]),
-                        (grid_y > 0 && *predictor == Predictor::Weighted)
-                            .then_some(&prev_aux_refs[..]),
-                        &mut aux_out,
-                        grid_shape.0,
-                        *num_colors,
-                        *num_deltas,
-                        *predictor,
-                        wp_header,
-                        &mut transform_scratch_space.palette_row_scratch,
-                    )?;
+                        let mut in_bufs = vec![];
+                        for gx in 0..grid_xsize {
+                            in_bufs.push(borrow_channel(buffers, (*buf_in, out_grid + gx)));
+                        }
+                        let in_buf_refs: Vec<&ModularChannel> =
+                            in_bufs.iter().map(|x| x.as_ref().unwrap()).collect();
+
+                        let mut aux_out: Vec<_> = if *predictor == Predictor::Weighted {
+                            buf_out
+                                .iter()
+                                .map(|i| {
+                                    buffers[*i].buffer_grid[grid_y * stride]
+                                        .auxiliary_data
+                                        .try_write()
+                                        .unwrap()
+                                })
+                                .collect()
+                        } else {
+                            vec![]
+                        };
+
+                        PaletteStep {
+                            buf_in: &in_buf_refs,
+                            buf_pal: img_pal.as_ref().unwrap(),
+                            buf_out: &mut out_buf_refs,
+                            num_deltas: *num_deltas,
+                            predictor: *predictor,
+                            wp_header,
+                            grid_xsize,
+                            buf_left: left_refs.as_deref(),
+                            buf_top: has_top.then_some(&top_refs[..]),
+                            buf_topleft: topleft_refs.as_deref(),
+                            prev_aux: (has_top && *predictor == Predictor::Weighted)
+                                .then_some(&prev_aux_refs[..]),
+                            aux_out: &mut aux_out,
+                            storage: buffers[*buf_in].storage,
+                        }
+                        .run(&mut scratch_space.palette_row_scratch)?;
+                    }
                 }
                 let buf_pal_grid = &buffers[*buf_pal].buffer_grid[0];
                 buf_pal_grid.mark_used(buf_pal_grid.can_consume(is_final), recycler);
-                for grid_x in 0..grid_shape.0 {
-                    let buf_in_grid = &buffers[*buf_in].buffer_grid[out_grid + grid_x];
+                for gx in 0..grid_xsize {
+                    let buf_in_grid = &buffers[*buf_in].buffer_grid[out_grid + gx];
                     buf_in_grid.mark_used(buf_in_grid.can_consume(is_final), recycler);
                 }
             }
@@ -893,6 +881,7 @@ impl TransformStepChunk {
                 upsample,
             } => {
                 let vertical = matches!(self.step, TransformStep::VSqueeze { .. });
+                let storage = buffers[*buf_out].storage;
                 let info = SqueezeInfo::new(
                     buffers,
                     *buf_in,
@@ -921,7 +910,7 @@ impl TransformStepChunk {
                             assert!(!is_final);
                             assert_eq!(bufs.len(), 1);
                             let view = info.borrow_upsample_view(buffers, frame_header);
-                            let scratch = &mut transform_scratch_space.smooth_upsample_scratch;
+                            let scratch = &mut scratch_space.smooth_upsample_scratch;
                             let dither = buffers[*buf_out].info.shift.unwrap_or((0, 0)) == (0, 0)
                                 && !buffers[*buf_out].info.followed_by_palette;
                             smooth_upsample(
@@ -930,6 +919,7 @@ impl TransformStepChunk {
                                 dither,
                                 out_rect,
                                 &mut bufs[0].data,
+                                storage,
                                 scratch,
                             );
                         }
@@ -937,21 +927,25 @@ impl TransformStepChunk {
                             avg_rect, res_rect, ..
                         } => {
                             let inputs = info.borrow_inputs(buffers, vertical);
+                            let in_next = inputs.in_next_border();
+                            let out_prev = inputs.out_prev_border();
                             if vertical {
                                 super::squeeze::do_vsqueeze_step(
-                                    &inputs.in_avg_rect(avg_rect),
-                                    &inputs.in_res_rect(res_rect),
-                                    inputs.in_next_border(),
-                                    inputs.out_prev_border(),
+                                    &inputs.in_avg_rect(avg_rect, storage),
+                                    &inputs.in_res_rect(res_rect, storage),
+                                    in_next.as_ref(),
+                                    out_prev.as_ref(),
                                     &mut bufs,
+                                    storage,
                                 );
                             } else {
                                 super::squeeze::do_hsqueeze_step(
-                                    &inputs.in_avg_rect(avg_rect),
-                                    &inputs.in_res_rect(res_rect),
-                                    inputs.in_next_border(),
-                                    inputs.out_prev_border(),
+                                    &inputs.in_avg_rect(avg_rect, storage),
+                                    &inputs.in_res_rect(res_rect, storage),
+                                    in_next.as_ref(),
+                                    out_prev.as_ref(),
                                     &mut bufs,
+                                    storage,
                                 );
                             }
                         }
@@ -968,27 +962,50 @@ impl TransformStepChunk {
             } => {
                 debug!("Rendering channel {channel:?}, rect {rect:?}, group {group}");
                 let buf = &buffers[*buf_in].buffer_grid[out_grid];
+                let storage = buffers[*buf_in].storage;
                 if buf.data_status == DataStatus::Zero && !buf.has_buffer() {
-                    let zero = Image::new(rect.map(|x| x.size).unwrap_or(buf.size))?;
-                    pass_to_pipeline(*channel, *group, is_final, zero)?;
+                    let sz = rect.map(|x| x.size).unwrap_or(buf.size);
+                    let raw = match storage {
+                        ModularStorage::I16 => Image::<i16>::new(sz)?.into_raw(),
+                        ModularStorage::I32 => Image::<i32>::new(sz)?.into_raw(),
+                    };
+                    pass_to_pipeline(*channel, *group, is_final, raw)?;
                 } else {
                     let modular_buf = buf.get_buffer(buf.can_consume(is_final), recycler)?;
-                    if let Some(rect) = rect {
-                        let mut cropped = Image::new(rect.size)?;
-                        let src_view = modular_buf.data.get_rect(*rect);
-                        for y in 0..rect.size.1 {
-                            cropped.row_mut(y).copy_from_slice(src_view.row(y));
+                    let raw = if let Some(rect) = rect {
+                        match storage {
+                            ModularStorage::I16 => {
+                                let mut cropped = Image::<i16>::new(rect.size)?;
+                                let src_view =
+                                    ImageRect::<i16>::from_raw(modular_buf.data.as_rect())
+                                        .rect(*rect);
+                                for y in 0..rect.size.1 {
+                                    cropped.row_mut(y).copy_from_slice(src_view.row(y));
+                                }
+                                cropped.into_raw()
+                            }
+                            ModularStorage::I32 => {
+                                let mut cropped = Image::<i32>::new(rect.size)?;
+                                let src_view =
+                                    ImageRect::<i32>::from_raw(modular_buf.data.as_rect())
+                                        .rect(*rect);
+                                for y in 0..rect.size.1 {
+                                    cropped.row_mut(y).copy_from_slice(src_view.row(y));
+                                }
+                                cropped.into_raw()
+                            }
                         }
-                        pass_to_pipeline(*channel, *group, is_final, cropped)?;
                     } else {
-                        pass_to_pipeline(*channel, *group, is_final, modular_buf.data)?;
-                    }
+                        modular_buf.data
+                    };
+                    pass_to_pipeline(*channel, *group, is_final, raw)?;
                 }
             }
         };
 
         for &(buf, grid) in self.outputs(buffers).iter() {
-            buffers[buf].buffer_grid[grid].extract_needed_borders(recycler)?;
+            buffers[buf].buffer_grid[grid]
+                .extract_needed_borders(buffers[buf].storage, recycler)?;
         }
 
         if is_final {

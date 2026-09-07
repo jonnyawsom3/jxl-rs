@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 use adaptive_lf_smoothing::adaptive_lf_smoothing;
 use block_context_map::BlockContextMap;
 use color_correlation_map::ColorCorrelationParams;
-use modular::{FullModularImage, Tree};
+use modular::{FullModularImage, ModularStorage, Tree};
 use quant_weights::DequantMatrices;
 use quantizer::{LfQuantFactors, QuantizerParams};
 
@@ -124,10 +124,14 @@ pub struct DecoderState {
     pub render_spotcolors: bool,
     #[cfg(test)]
     pub use_simple_pipeline: bool,
+    #[cfg(test)]
+    pub allow_16bit_modular_buffers: bool,
     pub visible_frame_index: usize,
     pub nonvisible_frame_index: usize,
     pub high_precision: bool,
     pub premultiply_output: bool,
+    pub force_level5_splines: bool,
+    pub sample_limit: Option<usize>,
     // Whether the latest level 1 LF frame was fully rendered.
     // If this is set to `true`, early flushing in the main frame
     // (before HF is available) will do nothing.
@@ -146,11 +150,27 @@ impl DecoderState {
             render_spotcolors: options.render_spot_colors,
             #[cfg(test)]
             use_simple_pipeline: false,
+            #[cfg(test)]
+            allow_16bit_modular_buffers: true,
             visible_frame_index: 0,
             nonvisible_frame_index: 0,
             high_precision: options.high_precision,
             premultiply_output: options.premultiply_output,
+            force_level5_splines: options.force_level5_splines,
+            sample_limit: options.sample_limit,
             lf_frame_was_rendered: false,
+        }
+    }
+
+    pub fn modular_storage(&self) -> ModularStorage {
+        #[cfg(test)]
+        if !self.allow_16bit_modular_buffers {
+            return ModularStorage::I32;
+        }
+        if self.file_header.image_metadata.modular_16bit_sufficient {
+            ModularStorage::I16
+        } else {
+            ModularStorage::I32
         }
     }
 
@@ -166,6 +186,11 @@ impl DecoderState {
     #[cfg(test)]
     pub fn set_use_simple_pipeline(&mut self, u: bool) {
         self.use_simple_pipeline = u;
+    }
+
+    #[cfg(test)]
+    pub fn disable_16bit_modular_buffers(&mut self) {
+        self.allow_16bit_modular_buffers = false;
     }
 }
 

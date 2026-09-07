@@ -9,16 +9,16 @@ use std::ops::Range;
 use crate::bit_reader::BitReader;
 use crate::entropy_coding::decode::{Histograms, SymbolReader, unpack_signed};
 use crate::error::Result;
-use crate::frame::modular::decode::channel::ModularChannelDecoder;
+use crate::frame::modular::decode::channel::{ModularChannelDecoder, sync_scratch};
 use crate::frame::modular::decode::common::{make_pixel, precompute_references};
 use crate::frame::modular::flat_tree::{FlatTreeNode, predict_flat};
 use crate::frame::modular::predict::{PredictionData, WeightedPredictorState, clamped_gradient};
 use crate::frame::modular::tree::{
     NUM_NONREF_PROPERTIES, PROPERTIES_PER_PREVCHAN, PredictionResult, TreeNode,
 };
-use crate::frame::modular::{ModularChannel, Predictor, Tree};
+use crate::frame::modular::{ModularChannel, ModularStorage, Predictor, Tree};
 use crate::headers::modular::GroupHeader;
-use crate::image::Image;
+use crate::image::{Image, ImageRectMut};
 
 trait MaybeWeightedPredictor: Sized {
     fn predict(
@@ -120,6 +120,7 @@ struct FlatTreeInner {
     nodes: Vec<FlatTreeNode>,
     references: Image<i32>,
     property_buffer: Box<[i32; 256]>,
+    storage: ModularStorage,
 }
 
 impl FlatTreeInner {
@@ -129,6 +130,7 @@ impl FlatTreeInner {
         channel: usize,
         stream: usize,
         xsize: usize,
+        storage: ModularStorage,
     ) -> Result<Self> {
         let num_ref_props = max_property_count
             .saturating_sub(NUM_NONREF_PROPERTIES)
@@ -143,6 +145,7 @@ impl FlatTreeInner {
             nodes: Tree::build_flat_tree(&nodes)?,
             references,
             property_buffer,
+            storage,
         })
     }
 }
@@ -165,7 +168,13 @@ impl<WP: MaybeWeightedPredictor, R: Reader> FlatTree<WP, R> {
 
 impl<WP: MaybeWeightedPredictor, R: Reader> ModularChannelDecoder for FlatTree<WP, R> {
     fn init_row(&mut self, buffers: &mut [&mut ModularChannel], chan: usize, y: usize) {
-        precompute_references(buffers, chan, y, &mut self.inner.references);
+        precompute_references(
+            buffers,
+            chan,
+            y,
+            &mut self.inner.references,
+            self.inner.storage,
+        );
         self.inner.property_buffer[GRADIENT_PROPERTY as usize] = 0;
     }
 
@@ -396,12 +405,37 @@ impl ModularChannelDecoder for NoTreeZero {
         br: &mut BitReader,
         y: usize,
         xsize: usize,
+        mut scratch: Option<&mut [Vec<i32>; 3]>,
     ) {
-        let row = buffers[chan].data.row_mut(y);
-        debug_assert_eq!(row.len(), xsize);
+        let storage = if scratch.is_some() {
+            ModularStorage::I16
+        } else {
+            ModularStorage::I32
+        };
         if let Some(sym) = self.single_value {
-            row.fill(make_pixel(sym, self.multiplier, self.offset));
-        } else if self.multiplier == 1 && self.offset == 0 {
+            match storage {
+                ModularStorage::I16 => {
+                    let mut rect = ImageRectMut::<i16>::from_raw(buffers[chan].data.as_rect_mut());
+                    rect.row(y)
+                        .fill(make_pixel(sym, self.multiplier, self.offset) as i16);
+                }
+                ModularStorage::I32 => {
+                    let mut rect = ImageRectMut::<i32>::from_raw(buffers[chan].data.as_rect_mut());
+                    rect.row(y)
+                        .fill(make_pixel(sym, self.multiplier, self.offset));
+                }
+            }
+            return;
+        }
+        let mut rect;
+        let row: &mut [i32] = if let Some(scratch) = scratch.as_deref_mut() {
+            &mut scratch[0][..xsize]
+        } else {
+            rect = ImageRectMut::<i32>::from_raw(buffers[chan].data.as_rect_mut());
+            rect.row(y)
+        };
+        debug_assert_eq!(row.len(), xsize);
+        if self.multiplier == 1 && self.offset == 0 {
             for r in row.iter_mut() {
                 *r = reader.read_signed_clustered_inline(histograms, br, self.clustered_ctx);
             }
@@ -412,6 +446,7 @@ impl ModularChannelDecoder for NoTreeZero {
                 *r = make_pixel(residual, self.multiplier, self.offset);
             }
         }
+        sync_scratch(buffers[chan], y, scratch);
     }
 }
 
@@ -421,6 +456,7 @@ pub fn run_on_specialized_tree<F: FnOnce(&mut dyn ModularChannelDecoder) -> Resu
     stream: usize,
     xsize: usize,
     header: &GroupHeader,
+    storage: ModularStorage,
     run: F,
 ) -> Result<()> {
     // TODO(veluca): consider skipping the pruning if header.uses_global_tree is true.
@@ -563,7 +599,14 @@ pub fn run_on_specialized_tree<F: FnOnce(&mut dyn ModularChannelDecoder) -> Resu
 
     let single_symbol = single_symbol.map(unpack_signed);
 
-    let inner = FlatTreeInner::new(pruned_tree, max_property_count, channel, stream, xsize)?;
+    let inner = FlatTreeInner::new(
+        pruned_tree,
+        max_property_count,
+        channel,
+        stream,
+        xsize,
+        storage,
+    )?;
 
     // Non-WP trees (includes effort 2 encoding and some groups in effort > 3)
     if !uses_wp {
