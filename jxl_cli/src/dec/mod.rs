@@ -18,17 +18,11 @@ use jxl::headers::extra_channels::ExtraChannel;
 use jxl::image::{OwnedRawImage, Rect};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-pub struct PartialRender {
-    pub byte_index: usize,
-    pub channels: Vec<OwnedRawImage>,
-}
-
 pub struct ImageFrame {
-    pub partial_renders: Vec<PartialRender>,
+    pub partial_renders: Vec<Vec<OwnedRawImage>>,
     pub channels: Vec<OwnedRawImage>,
     pub duration: f64,
     pub color_type: JxlColorType,
-    pub total_bytes: usize,
 }
 
 pub struct DecodeOutput {
@@ -168,7 +162,6 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
     allow_partial_files: bool,
 ) -> Result<(DecodeOutput, Duration)> {
     let start = Instant::now();
-    let total_bytes = input.available_bytes()?;
 
     let mut decoder_with_image_info = decode_header(input, render_interval, decoder_options)?;
 
@@ -326,7 +319,7 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                             .flush_pixels(&mut output_bufs, Some(&mut RayonParallelRunner))?;
                         if has_rendered_data {
                             partial_renders.push(
-                                channels: outputs
+                                outputs
                                     .iter()
                                     .map(|x| x.try_clone())
                                     .collect::<Result<_, _>>()?,
@@ -381,7 +374,7 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                             .flush_pixels(&mut output_bufs, Some(&mut RayonParallelRunner))?;
                         if has_rendered_data {
                             partial_renders.push(
-                                channels: outputs
+                                outputs
                                     .iter()
                                     .map(|x| x.try_clone())
                                     .collect::<Result<_, _>>()?,
@@ -444,7 +437,7 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
             for partial in &mut frame.partial_renders {
                 let black_image = black_channel.map(|x| partial.channels.remove(x));
                 apply_cms(
-                    &mut partial.channels[0],
+                    &mut partial[0],
                     black_image.as_ref(),
                     samples_per_pixel,
                     color_channels,
