@@ -296,7 +296,9 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
             outputs.push(OwnedRawImage::new(byte_size)?);
         }
 
-        let mut partial_renders: Vec<PartialRender> = vec![];
+        let mut partial_renders: Vec<Vec<OwnedRawImage>> = vec![];
+
+        let mut has_rendered_data = false;
 
         let mut decoder_with_frame_info = 'partial: loop {
             match input.with_capped_size(render_interval, |inp| {
@@ -320,16 +322,15 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                     // If we have more data but we're feeding it slowly, save the partial
                     // render and retry.
                     if render_interval.is_some() && input.available_bytes()? > 0 {
-                        let changed = fallback
+                        has_rendered_data |= fallback
                             .flush_pixels(&mut output_bufs, Some(&mut RayonParallelRunner))?;
-                        if changed {
-                            partial_renders.push(PartialRender {
-                                byte_index: total_bytes.saturating_sub(input.available_bytes()?),
+                        if has_rendered_data {
+                            partial_renders.push(
                                 channels: outputs
                                     .iter()
                                     .map(|x| x.try_clone())
                                     .collect::<Result<_, _>>()?,
-                            });
+                            );
                         }
                         decoder_with_image_info = fallback;
                         continue 'partial;
@@ -340,7 +341,6 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                             duration: 0.0,
                             channels: outputs,
                             color_type,
-                            total_bytes,
                         });
                         break 'frame;
                     }
@@ -377,16 +377,15 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                     // If we have more data but we're feeding it slowly, save the partial
                     // render and retry.
                     if render_interval.is_some() && input.available_bytes()? > 0 {
-                        let changed = fallback
+                        has_rendered_data |= fallback
                             .flush_pixels(&mut output_bufs, Some(&mut RayonParallelRunner))?;
-                        if changed {
-                            partial_renders.push(PartialRender {
-                                byte_index: total_bytes.saturating_sub(input.available_bytes()?),
+                        if has_rendered_data {
+                            partial_renders.push(
                                 channels: outputs
                                     .iter()
                                     .map(|x| x.try_clone())
                                     .collect::<Result<_, _>>()?,
-                            });
+                            );
                         }
                         decoder_with_frame_info = fallback;
                         continue 'partial;
@@ -397,7 +396,6 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
                             duration: frame_header.duration.unwrap_or(0.0),
                             channels: outputs,
                             color_type,
-                            total_bytes,
                         });
                         break 'frame;
                     }
@@ -411,7 +409,6 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
             duration: frame_header.duration.unwrap_or(0.0),
             channels: outputs,
             color_type,
-            total_bytes,
         });
 
         if !decoder_with_image_info.has_more_frames() {
