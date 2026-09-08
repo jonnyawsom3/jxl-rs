@@ -90,10 +90,6 @@ struct Opt {
     /// Force a partial render every `render_interval` bytes.
     #[clap(long)]
     render_interval: Option<usize>,
-
-    /// Allow Level 10 limits for splines instead of the default Level 5 limits.
-    #[clap(long)]
-    allow_level10_splines: bool,
 }
 
 fn save_icc(icc_bytes: &[u8], icc_filename: Option<&PathBuf>) -> Result<()> {
@@ -125,13 +121,11 @@ fn main() -> Result<()> {
         .transpose()?;
 
     let high_precision = opt.high_precision;
-    let allow_level10_splines = opt.allow_level10_splines;
     let options = |skip_preview: bool| {
         let mut options = JxlDecoderOptions::default();
         options.render_spot_colors = !matches!(output_format, Some(OutputFormat::Npy));
         options.skip_preview = skip_preview;
         options.high_precision = high_precision;
-        options.force_level5_splines = !allow_level10_splines;
         options
     };
     rayon::ThreadPoolBuilder::new()
@@ -191,7 +185,6 @@ fn main() -> Result<()> {
                 output_format
                     .map(|x| x.supported_output_data_types())
                     .unwrap_or(OutputDataType::ALL),
-                output_format.is_none_or(|x| x.accepts_cmyk()),
                 output_format.is_none_or(|x| x.should_fold_alpha()),
                 linear_output,
                 opt.render_interval,
