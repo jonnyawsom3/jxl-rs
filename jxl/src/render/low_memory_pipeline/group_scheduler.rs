@@ -113,7 +113,7 @@ fn ready_image_area(
     }
     .min(input_size.0);
 
-    (x1 >= x0 && y1 >= y0).then_some(Rect {
+    (x1 >= x0 && y1 >= y0).then(|| Rect {
         origin: (x0, y0),
         size: (x1 - x0, y1 - y0),
     })
@@ -170,7 +170,7 @@ impl LowMemoryRenderPipeline {
                 let width = (1 << self.shared.log_group_size) * ty.size();
                 self.shared
                     .buffer_recycler
-                    .get_raw_buffer((width, height))?
+                    .get_raw_buffer((width, height), false)?
             };
             let mut leftright = if let Some(b) = buf.leftright[c].try_write().unwrap().take() {
                 b
@@ -179,7 +179,7 @@ impl LowMemoryRenderPipeline {
                 let width = 4 * bx * ty.size();
                 self.shared
                     .buffer_recycler
-                    .get_raw_buffer((width, height))?
+                    .get_raw_buffer((width, height), false)?
             };
             let data = buf.data[c].try_read().unwrap();
             let input = data.as_ref().unwrap();
@@ -313,5 +313,24 @@ mod tests {
                 size: (26, 26),
             })
         );
+    }
+
+    // The last group of a 513-pixel-wide image is 1 pixel wide, narrower than
+    // the border, so its interior band starts past the right edge of the image.
+    #[test]
+    fn test_ready_image_area_interior_band_past_image_edge() {
+        let area = ready_image_area(
+            Rect {
+                origin: (512, 0),
+                size: (1, 256),
+            },
+            (2, 0),
+            (3, 2),
+            (513, 321),
+            (3, 3),
+            1..3,
+            0..2,
+        );
+        assert_eq!(area, None);
     }
 }
