@@ -93,14 +93,20 @@ impl OutputFormat {
                     .file_stem()
                     .map(|s| s.to_string_lossy())
                     .unwrap_or_else(|| "output".into());
-                for (i, partial) in frame.partial_renders.iter().enumerate() {
-                    let fname = dir.join(format!("{stem}.partial_{:012}.png", partial.byte_index));
+
+                for i in 0..=frame.partial_renders.len() {
+                    let fname = dir.join(format!("{stem}.partial{i:05}.png"));
                     let mut writer = BufWriter::new(File::create(fname)?);
-                    png::to_png(image_data, &mut writer, Some(i))?;
+                    png::to_png(
+                        image_data,
+                        &mut writer,
+                        if i < frame.partial_renders.len() {
+                            Some(i)
+                        } else {
+                            None
+                        },
+                    )?;
                 }
-                let fname = dir.join(format!("{stem}.partial_{:012}.png", frame.total_bytes));
-                let mut writer = BufWriter::new(File::create(fname)?);
-                png::to_png(image_data, &mut writer, None)?;
             }
         }
         let mut writer = BufWriter::new(File::create(output_filename)?);
