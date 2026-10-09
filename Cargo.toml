@@ -1,7 +1,7 @@
 [profile.release]
-debug = true
 lto = "thin"
 panic = "abort"
+strip = "symbols"
 
 [profile.dev]
 debug-assertions = true
