@@ -318,19 +318,16 @@ pub fn decode_frames<In: JxlBitstreamInputExt>(
             Event::NeedMoreInput { .. } => {
                 if render_interval.is_some() && input.available_bytes()? > 0 {
                     if let Some(ref mut output_bufs) = output_bufs {
-                        let changed =
-                            decoder.flush_pixels(output_bufs, Some(&mut RayonParallelRunner))?;
-                        if changed {
-                            partial_renders.push(PartialRender {
-                                byte_index: total_bytes.saturating_sub(input.available_bytes()?),
-                                channels: outputs
-                                    .as_ref()
-                                    .unwrap()
-                                    .iter()
-                                    .map(|x| x.try_clone())
-                                    .collect::<Result<_, _>>()?,
-                            });
-                        }
+                        decoder.flush_pixels(output_bufs, Some(&mut RayonParallelRunner))?;
+                        partial_renders.push(PartialRender {
+                            byte_index: total_bytes.saturating_sub(input.available_bytes()?),
+                            channels: outputs
+                                .as_ref()
+                                .unwrap()
+                                .iter()
+                                .map(|x| x.try_clone())
+                                .collect::<Result<_, _>>()?,
+                        });
                     }
                     continue;
                 } else if allow_partial_files {
