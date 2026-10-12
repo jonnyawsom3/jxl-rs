@@ -1297,6 +1297,19 @@ fn test_fuzzer_modular_palette_empty_meta_channel() {
     assert!(decode::<f32>(data, Default::default()).is_err());
 }
 
+/// `dim_shift = 3` with `ec_upsampling = 2` is a cumulative extra channel upsampling of 16, which is
+/// rejected (at most 8) also when the frame itself is not upsampled.
+#[test]
+fn test_ec_upsampling_too_large_without_upsampling() {
+    let data = include_bytes!("../../tests/testdata/ec_upsampling16_no_upsampling.jxl");
+    let result = decode::<f32>(data, Default::default());
+    assert!(
+        matches!(result, Err(Error::InvalidEcUpsampling(1, 3, 16))),
+        "expected an extra channel upsampling error, got {:?}",
+        result.map(|_| "a decoded image")
+    );
+}
+
 /// Regression test: a frame with patches that declares `upsampling = 4` and `ec_upsampling = [4]`
 /// for an extra channel with `dim_shift = 1`. The declared amounts match, so the guard against
 /// mixing patches with differing upsampling used to pass, and `postprocess` then shifted the
@@ -1629,4 +1642,19 @@ fn aux_box_seek() {
     process_to_complete(&mut decoder, &mut buf);
     assert!(decoder.aux_boxes(ty_foo).is_empty());
     assert_eq!(decoder.aux_boxes(ty_bar).len(), 2);
+}
+
+#[test]
+fn test_fuzzer_icc_lz77_restore_empty_rewind() {
+    let data = include_bytes!("../../tests/testdata/icc_lz77_restore_empty_rewind.jxl");
+    for chunk_size in 1..=data.len() {
+        let _ = decode::<f32>(
+            data,
+            DecodeParams {
+                chunk_size,
+                do_flush: true,
+                ..Default::default()
+            },
+        );
+    }
 }
