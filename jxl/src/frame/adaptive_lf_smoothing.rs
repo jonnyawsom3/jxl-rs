@@ -67,51 +67,97 @@ pub fn adaptive_lf_smoothing(
         let mut out_ref_1 = splitter1.borrow_typed_rect::<f32>(r);
         let mut out_ref_2 = splitter2.borrow_typed_rect::<f32>(r);
 
-        for ly in 0..r.size.1 {
-            let gy = r.origin.1 + ly;
-            let row_0 = out_ref_0.typed_row_mut::<f32>(ly);
-            let row_1 = out_ref_1.typed_row_mut::<f32>(ly);
-            let row_2 = out_ref_2.typed_row_mut::<f32>(ly);
+        if frame_header.is444() {
+            for ly in 0..r.size.1 {
+                let gy = r.origin.1 + ly;
+                let row_0 = out_ref_0.typed_row_mut::<f32>(ly);
+                let row_1 = out_ref_1.typed_row_mut::<f32>(ly);
+                let row_2 = out_ref_2.typed_row_mut::<f32>(ly);
 
-            for lx in 0..r.size.0 {
-                let gx = r.origin.0 + lx;
+                for lx in 0..r.size.0 {
+                    let gx = r.origin.0 + lx;
 
-                if gy == 0 || gy == ysize - 1 || gx == 0 || gx == xsize - 1 {
-                    row_0[lx] = lf_image[0].row(gy)[gx];
-                    row_1[lx] = lf_image[1].row(gy)[gx];
-                    row_2[lx] = lf_image[2].row(gy)[gx];
-                    continue;
+                    if gy == 0 || gy == ysize - 1 || gx == 0 || gx == xsize - 1 {
+                        row_0[lx] = lf_image[0].row(gy)[gx];
+                        row_1[lx] = lf_image[1].row(gy)[gx];
+                        row_2[lx] = lf_image[2].row(gy)[gx];
+                        continue;
+                    }
+
+                    let gap = 0.5;
+                    let (mc_x, sm_x, gap) = compute_pixel_channel(
+                        lf_factors[0],
+                        gap,
+                        gx,
+                        lf_image[0].row(gy - 1),
+                        lf_image[0].row(gy),
+                        lf_image[0].row(gy + 1),
+                    );
+                    let (mc_y, sm_y, gap) = compute_pixel_channel(
+                        lf_factors[1],
+                        gap,
+                        gx,
+                        lf_image[1].row(gy - 1),
+                        lf_image[1].row(gy),
+                        lf_image[1].row(gy + 1),
+                    );
+                    let (mc_b, sm_b, gap) = compute_pixel_channel(
+                        lf_factors[2],
+                        gap,
+                        gx,
+                        lf_image[2].row(gy - 1),
+                        lf_image[2].row(gy),
+                        lf_image[2].row(gy + 1),
+                    );
+                    let factor = (3.0 - 4.0 * gap).max(0.0);
+                    row_0[lx] = (sm_x - mc_x) * factor + mc_x;
+                    row_1[lx] = (sm_y - mc_y) * factor + mc_y;
+                    row_2[lx] = (sm_b - mc_b) * factor + mc_b;
                 }
+            }
+        } else {
+            let mut out_refs = [out_ref_0, out_ref_1, out_ref_2];
+            for (c, out_ref) in out_refs.iter_mut().enumerate() {
+                let hs = frame_header.hshift(c);
+                let vs = frame_header.vshift(c);
+                let rect_w = r.size.0 >> hs;
+                let rect_h = r.size.1 >> vs;
+                let xsize_c = xsize >> hs;
+                let ysize_c = ysize >> vs;
 
-                let gap = 0.5;
-                let (mc_x, sm_x, gap) = compute_pixel_channel(
-                    lf_factors[0],
-                    gap,
-                    gx,
-                    lf_image[0].row(gy - 1),
-                    lf_image[0].row(gy),
-                    lf_image[0].row(gy + 1),
-                );
-                let (mc_y, sm_y, gap) = compute_pixel_channel(
-                    lf_factors[1],
-                    gap,
-                    gx,
-                    lf_image[1].row(gy - 1),
-                    lf_image[1].row(gy),
-                    lf_image[1].row(gy + 1),
-                );
-                let (mc_b, sm_b, gap) = compute_pixel_channel(
-                    lf_factors[2],
-                    gap,
-                    gx,
-                    lf_image[2].row(gy - 1),
-                    lf_image[2].row(gy),
-                    lf_image[2].row(gy + 1),
-                );
-                let factor = (3.0 - 4.0 * gap).max(0.0);
-                row_0[lx] = (sm_x - mc_x) * factor + mc_x;
-                row_1[lx] = (sm_y - mc_y) * factor + mc_y;
-                row_2[lx] = (sm_b - mc_b) * factor + mc_b;
+                for ly in 0..rect_h {
+                    let gy = r.origin.1 + ly;
+                    let out_row = out_ref.typed_row_mut::<f32>(ly);
+
+                    if ysize_c <= 2
+                        || xsize_c <= 2
+                        || gy == 0
+                        || gy == ysize_c - 1
+                        || ly == 0
+                        || ly == rect_h - 1
+                    {
+                        out_row[..rect_w]
+                            .copy_from_slice(&lf_image[c].row(gy)[r.origin.0..r.origin.0 + rect_w]);
+                        continue;
+                    }
+
+                    let row_top = lf_image[c].row(gy - 1);
+                    let row = lf_image[c].row(gy);
+                    let row_bottom = lf_image[c].row(gy + 1);
+
+                    for (lx, out_val) in out_row[..rect_w].iter_mut().enumerate() {
+                        let gx = r.origin.0 + lx;
+                        if gx == 0 || gx == xsize_c - 1 || lx == 0 || lx == rect_w - 1 {
+                            *out_val = row[gx];
+                            continue;
+                        }
+
+                        let (mc, sm, gap) =
+                            compute_pixel_channel(lf_factors[c], 0.5, gx, row_top, row, row_bottom);
+                        let factor = (3.0 - 4.0 * gap).max(0.0);
+                        *out_val = (sm - mc) * factor + mc;
+                    }
+                }
             }
         }
         Ok(())
